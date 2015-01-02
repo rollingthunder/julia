@@ -134,6 +134,10 @@ release-candidate: release test
 $(build_docdir)/helpdb.jl: doc/helpdb.jl | $(build_docdir)
 	@cp $< $@
 
+doc/helpdb.jl:
+	@$(MAKE) -C deps install-virtualenv
+	@$(MAKE) -C doc helpdb.jl
+
 $(build_man1dir)/julia.1: doc/man/julia.1 | $(build_man1dir)
 	@mkdir -p $(build_man1dir)
 	@cp $< $@
@@ -471,6 +475,7 @@ ifeq ($(OS),WINNT)
 	@rm -rf $(build_prefix)/lib
 endif
 	@$(MAKE) -C deps clean-uv
+	@rm -f doc/helpdb.jl $(build_docdir)/helpdb.jl
 
 distcleanall: cleanall
 	@$(MAKE) -C deps distcleanall
