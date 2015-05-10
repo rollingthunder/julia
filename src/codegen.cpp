@@ -449,13 +449,6 @@ struct jl_gcinfo_t {
     BasicBlock::iterator last_gcframe_inst;
 };
 
-enum codegen_target {
-    HOST = -1,
-    PTX = 0,
-	SPIR,
-	HSAIL
-};
-
 // information about the context of a piece of code: its enclosing
 // function and module, and visible local variables and labels.
 typedef struct {
@@ -3518,29 +3511,6 @@ static void allocate_gc_frame(size_t n_roots, BasicBlock *b0, jl_codectx_t *ctx)
     gc->argSlot = builder.CreateConstGEP1_32(gc->gcframe, 2);
     gc->tempSlot = (GetElementPtrInst*)builder.CreateConstGEP1_32(gc->gcframe, 2);
     gc->last_gcframe_inst = BasicBlock::iterator((Instruction*)gc->tempSlot);
-}
-
-static void clear_gc_frame(jl_gcinfo_t *gc)
-{
-    // replace instruction uses with Undef first to avoid LLVM assertion failures
-    BasicBlock::iterator bbi = gc->first_gcframe_inst;
-    while (1) {
-        Instruction &iii = *bbi;
-        Type *ty = iii.getType();
-        if (ty != T_void)
-            iii.replaceAllUsesWith(UndefValue::get(ty));
-        if (bbi == gc->last_gcframe_inst) break;
-        bbi++;
-    }
-    // Remove GC frame creation
-    // (instructions from gc->gcframe to gc->last_gcframe_inst)
-    BasicBlock::InstListType &il = gc->gcframe->getParent()->getInstList();
-    il.erase(gc->first_gcframe_inst, gc->last_gcframe_inst);
-    // erase() erases up *to* the end point; erase last inst too
-    il.erase(gc->last_gcframe_inst);
-}
-
-static void
 }
 
 static void clear_gc_frame(jl_gcinfo_t *gc)
