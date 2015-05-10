@@ -291,8 +291,10 @@ endif
 
 ifeq ($(LLVM_DEBUG),1)
 LLVM_BUILDTYPE = Debug
+LLVM_CMAKE_BUILDTYPE = Debug
 else
 LLVM_BUILDTYPE = Release
+LLVM_CMAKE_BUILDTYPE = Release
 endif
 ifeq ($(LLVM_ASSERTIONS),1)
 LLVM_BUILDTYPE := $(LLVM_BUILDTYPE)+Asserts
@@ -305,9 +307,18 @@ else
 LLVM_BUILDTYPE := $(LLVM_BUILDTYPE)+ASAN
 endif
 endif
+ifeq ($(LLVM_CMAKE_BUILD),1)
+LLVM_BUILDTYPE := CMake-$(LLVM_BUILDTYPE)
+endif
+
+LLVM_BUILDDIR = llvm-$(LLVM_VER)/build_$(LLVM_BUILDTYPE)
 
 LLVM_LIB_FILE = libLLVMCodeGen.a
-LLVM_OBJ_SOURCE = llvm-$(LLVM_VER)/build_$(LLVM_BUILDTYPE)/$(LLVM_FLAVOR)/lib/$(LLVM_LIB_FILE)
+ifneq ($(LLVM_CMAKE_BUILD),1)
+LLVM_OBJ_SOURCE = $(LLVM_BUILDDIR)/$(LLVM_FLAVOR)/lib/$(LLVM_LIB_FILE)
+else
+LLVM_OBJ_SOURCE = $(LLVM_BUILDDIR)/lib/$(LLVM_LIB_FILE)
+endif # LLVM_CMAKE_BUILD
 LLVM_OBJ_TARGET = $(build_libdir)/$(LLVM_LIB_FILE)
 
 ifneq ($(LLVM_VER),svn)
@@ -347,17 +358,22 @@ endif # LLVM_VER != svn
 LLVM_CXXFLAGS = $(CXXFLAGS)
 LLVM_CPPFLAGS = $(CPPFLAGS)
 LLVM_LDFLAGS = $(LDFLAGS)
-LLVM_TARGET_FLAGS= --enable-targets=host
-LLVM_FLAGS += --disable-profiling --enable-shared --enable-static $(LLVM_TARGET_FLAGS) --disable-bindings --disable-docs
-# LLVM has weird install prefixes (see llvm-$(LLVM_VER)/build_$(LLVM_BUILDTYPE)/Makefile.config for the full list)
+LLVM_CMAKE_TARGETS += host
+LLVM_TARGET_FLAGS = --enable-targets=$(subst ;,,,$(LLVM_CMAKE_TARGETS))
+LLVM_CMAKE = -DCMAKE_BUILD_TYPE=$(LLVM_CMAKE_BUILDTYPE) -DLLVM_TARGETS_TO_BUILD=$(LLVM_CMAKE_TARGETS) -DLLVM_BUILD_BINDINGS=OFF -DLLVM_BUILD_DOCS=OFF -DLLVM_ENABLE_PEDANTIC=OFF
+LLVM_FLAGS += --disable-profiling --enable-static $(LLVM_TARGET_FLAGS) --disable-bindings --disable-docs
+# LLVM has weird install prefixes (see $(LLVM_BUILDDIR)/Makefile.config for the full list)
 # We map them here to the "normal" ones, which means just prefixing "PROJ_" to the variable name.
 LLVM_MFLAGS = PROJ_libdir=$(build_libdir) PROJ_bindir=$(build_bindir) PROJ_includedir=$(build_includedir)
 ifeq ($(LLVM_ASSERTIONS), 1)
+LLVM_CMAKE += -DLLVM_ENABLE_ASSERTIONS=ON
 LLVM_FLAGS += --enable-assertions
 ifeq ($(OS), WINNT)
+#TODO Is there an equivalent for CMake build?
 LLVM_FLAGS += --disable-embed-stdcxx
 endif # OS == WINNT
 else
+LLVM_CMAKE += -DLLVM_ENABLE_ASSERTIONS=OFF
 LLVM_FLAGS += --disable-assertions
 endif # LLVM_ASSERTIONS
 ifeq ($(LLVM_DEBUG), 1)
@@ -368,6 +384,13 @@ endif # LLVM_DEBUG
 ifeq ($(USE_LIBCPP), 1)
 LLVM_FLAGS += --enable-libcpp
 endif # USE_LIBCPP
+
+ifeq ($(USE_LLVM_SHLIB),1)
+LLVM_CMAKE += -DBUILD_SHARED_LIBS=ON
+else
+LLVM_CMAKE += -DBUILD_SHARED_LIBS=OFF
+endif # USE_LLVM_SHLIB
+
 ifeq ($(OS), WINNT)
 LLVM_FLAGS += --with-extra-ld-options="-Wl,--stack,8388608" LDFLAGS=""
 # turn off shared LLVM on Windows unless explicitly requested
@@ -377,11 +400,14 @@ endif
 LLVM_CPPFLAGS += -D__USING_SJLJ_EXCEPTIONS__ -D__CRT__NO_INLINE
 endif # OS == WINNT
 ifeq ($(USE_INTEL_JITEVENTS), 1)
+LLVM_CMAKE += -DLLVM_USE_INTEL_JITEVENTS=ON
 LLVM_FLAGS += --with-intel-jitevents
 ifeq ($(OS), WINNT)
+LLVM_CMAKE += -DLLVM_ENABLE_THREADS=OFF
 LLVM_FLAGS += --disable-threads
 endif # OS == WINNT
 else
+LLVM_CMAKE += -DLLVM_ENABLE_THREADS=OFF
 LLVM_FLAGS += --disable-threads
 endif # USE_INTEL_JITEVENTS
 
@@ -625,22 +651,52 @@ endif
 	touch -c $@
 # end target llvm-$(LLVM_VER)/configure
 
-llvm-$(LLVM_VER)/build_$(LLVM_BUILDTYPE)/config.status: llvm-$(LLVM_VER)/configure | $(llvm_python_workaround) $(LIBCXX_DEPENDENCY)
+$(LLVM_BUILDDIR)/config.status: llvm-$(LLVM_VER)/configure | $(llvm_python_workaround) $(LIBCXX_DEPENDENCY)
 	cd llvm-$(LLVM_VER) && \
 	mkdir -p build_$(LLVM_BUILDTYPE) && cd build_$(LLVM_BUILDTYPE) && \
 	export PATH=$(abspath llvm-$(LLVM_VER)/python2_path):$$PATH && \
 	../configure $(CONFIGURE_COMMON) $(LLVM_CC) $(LLVM_FLAGS)
 	touch -c $@
 
-$(LLVM_OBJ_SOURCE): llvm-$(LLVM_VER)/build_$(LLVM_BUILDTYPE)/config.status | $(llvm_python_workaround)
-	cd llvm-$(LLVM_VER)/build_$(LLVM_BUILDTYPE) && \
+ifeq ($(LLVM_CMAKE_BUILD),1)
+LLVM_CMAKE_GENERATOR ?= Ninja
+LLVM_CMAKE_GEN_BINARY ?= ninja
+
+$(LLVM_BUILDDIR)/CMakeCache.txt: llvm-$(LLVM_VER)/configure | $(llvm_python_workaround)
+	cd llvm-$(LLVM_VER) && \
+	mkdir -p build_$(LLVM_BUILDTYPE) && cd build_$(LLVM_BUILDTYPE) && \
+	export PATH=$(abspath llvm-$(LLVM_VER)/python2_path):$$PATH && \
+	$(CMAKE) -G"$(LLVM_CMAKE_GENERATOR)" $(CMAKE_COMMON) $(LLVM_CMAKE) ..
+
+$(LLVM_OBJ_SOURCE): $(LLVM_BUILDDIR)/CMakeCache.txt
+	cd $(LLVM_BUILDDIR) && \
+	export PATH=$(abspath llvm-$(LLVM_VER)/python2_path):$$PATH && \
+	$(LLVM_CMAKE_GEN_BINARY)
+clean-llvm:
+	-$(LLVM_CMAKE_GEN_BINARY) -C $(LLVM_BUILDDIR) clean
+	-rm -f $(build_bindir)/llvm-config
+$(LLVM_OBJ_TARGET): $(LLVM_OBJ_SOURCE) | $(llvm_python_workaround)
+	export PATH=$(abspath llvm-$(LLVM_VER)/python2_path):$$PATH && \
+	$(LLVM_CMAKE_GEN_BINARY) -C $(LLVM_BUILDDIR) install
+	touch -c $@
+else
+$(LLVM_OBJ_SOURCE): $(LLVM_BUILDDIR)/config.status | $(llvm_python_workaround)
+	cd $(LLVM_BUILDDIR) && \
 	export PATH=$(abspath llvm-$(LLVM_VER)/python2_path):$$PATH && \
 	$(MAKE) $(LLVM_MFLAGS) $(MAKE_COMMON)
 	touch -c $@
+clean-llvm:
+	-$(MAKE) -C $(LLVM_BUILDDIR) clean
+	-rm -f $(build_bindir)/llvm-config
+$(LLVM_OBJ_TARGET): $(LLVM_OBJ_SOURCE) | $(llvm_python_workaround)
+	export PATH=$(abspath llvm-$(LLVM_VER)/python2_path):$$PATH && \
+	$(call make-install,$(LLVM_BUILDDIR),$(LLVM_MFLAGS))
+	touch -c $@
+endif # LLVM_CMAKE_BUILD
 
-llvm-$(LLVM_VER)/build_$(LLVM_BUILDTYPE)/checked: $(LLVM_OBJ_SOURCE) | $(llvm_python_workaround)
+$(LLVM_BUILDDIR)/checked: $(LLVM_OBJ_SOURCE) | $(llvm_python_workaround)
 ifeq ($(OS),$(BUILD_OS))
-	cd llvm-$(LLVM_VER)/build_$(LLVM_BUILDTYPE) && \
+	cd $(LLVM_BUILDDIR) && \
 	export PATH=$(abspath llvm-$(LLVM_VER)/python2_path):$$PATH && \
 	$(MAKE) $(LLVM_MFLAGS) check
 endif
@@ -654,9 +710,6 @@ reinstall-llvm:
 	-rm $(LLVM_OBJ_TARGET)
 	$(MAKE) -s install-llvm
 
-clean-llvm:
-	-$(MAKE) -C llvm-$(LLVM_VER)/build_$(LLVM_BUILDTYPE) clean
-	-rm -f $(build_bindir)/llvm-config
 distclean-llvm:
 	-rm -rf llvm-$(LLVM_VER).tar.gz llvm-$(LLVM_VER).src.tar.gz clang-$(LLVM_VER).src.tar.gz clang-$(LLVM_VER).tar.gz libcxx-$(LLVM_VER).src.tar.gz compiler-rt-$(LLVM_VER).src.tar.gz llvm-$(LLVM_VER)
 
@@ -665,9 +718,12 @@ get-llvm: $(LLVM_TAR) $(LLVM_CLANG_TAR) $(LLVM_COMPILER_RT_TAR) $(LLVM_LIBCXX_TA
 else
 get-llvm: llvm-$(LLVM_VER)/configure $(LIBCXX_GET_DEPENDENCY)
 endif
-configure-llvm: llvm-$(LLVM_VER)/build_$(LLVM_BUILDTYPE)/config.status
+ifeq ($(LLVM_CMAKE_BUILD),1)
+else
+configure-llvm: $(LLVM_BUILDDIR)/config.status
+endif # LLVM_CMAKE_BUILD
 compile-llvm: $(LLVM_OBJ_SOURCE)
-check-llvm: llvm-$(LLVM_VER)/build_$(LLVM_BUILDTYPE)/checked
+check-llvm: $(LLVM_BUILDDIR)/checked
 install-llvm: $(LLVM_OBJ_TARGET)
 #todo: LLVM make check target is broken on julia.mit.edu (and really slow elsewhere)
 
