@@ -186,6 +186,11 @@ ifeq ($(OS), WINNT)
 LIBTOOL_CCLD = CCLD="$(CC) -no-undefined -avoid-version"
 endif
 
+#HSAIL Target
+ifneq ($(findstring HSAIL, $(LLVM_TARGETS)),)
+STAGE1_DEPS += hsail
+endif # HSAIL Target
+
 ## Common build target prefixes
 
 DEP_LIBS = $(STAGE1_DEPS) $(STAGE2_DEPS) $(STAGE3_DEPS)
@@ -357,7 +362,7 @@ endif # LLVM_VER != svn
 LLVM_CXXFLAGS = $(CXXFLAGS)
 LLVM_CPPFLAGS = $(CPPFLAGS)
 LLVM_LDFLAGS = $(LDFLAGS)
-LLVM_TARGETS = host
+LLVM_TARGETS ?= host
 LLVM_TARGET_FLAGS = --enable-targets=$(LLVM_TARGETS)
 LLVM_CMAKE += -DLLVM_TARGETS_TO_BUILD:STRING="$(LLVM_TARGETS)" -DCMAKE_BUILD_TYPE="$(LLVM_BUILDTYPE)" -DLLVM_BUILD_LLVM_DYLIB:BOOL=ON -DLLVM_DYLIB_EXPORT_ALL:BOOL=ON
 LLVM_FLAGS += --disable-profiling --enable-shared --enable-static $(LLVM_TARGET_FLAGS) --disable-bindings --disable-docs
@@ -716,6 +721,38 @@ update-llvm:
 	([ -d "llvm-$(LLVM_VER)/tools/clang"  ] || exit 0;          cd llvm-$(LLVM_VER)/tools/clang; git pull --ff-only)
 	([ -d "llvm-$(LLVM_VER)/projects/compiler-rt" ] || exit 0;  cd llvm-$(LLVM_VER)/projects/compiler-rt; git pull --ff-only)
 	([ -d "llvm-$(LLVM_VER)/tools/lldb" ] || exit 0;            cd llvm-$(LLVM_VER)/tools/lldb; git pull --ff-only)
+
+## HSAIL Target ##
+LLVM_GIT_URL_HSAIL_TOOLS ?= git@github.com:HSAFoundation/HSAIL-Tools.git
+
+get-hsail: HSAIL-Tools/libHSAIL/CMakeLists.txt
+compile-hsail: HSAIL-Tools/libHSAIL/build/libhsail.a
+install-hsail: $(build_libdir)/libhsail.a
+clean-hsail: 
+	rm -rf HSAIL-Tools
+
+HSAIL-Tools/libHSAIL/CMakeLists.txt:
+	([ ! -d HSAIL-Tools/.git ] && \
+		git clone $(LLVM_GIT_URL_HSAIL_TOOLS) HSAIL-Tools ) || \
+	(cd HSAIL-Tools && \
+		git pull --ff-only)
+
+HSAIL-Tools/libHSAIL/build/configured: HSAIL-Tools/libHSAIL/CMakeLists.txt
+	mkdir -p HSAIL-Tools/libHSAIL/build && \
+	cd HSAIL-Tools/libHSAIL/build && \
+	$(CMAKE) $(CMAKE_GENERATOR_COMMAND) $(CMAKE_COMMON) ..
+	touch -c $@
+
+HSAIL-Tools/libHSAIL/build/libhsail.a: HSAIL-Tools/libHSAIL/build/configured
+	cd HSAIL-Tools/libHSAIL/build && \
+	$(CMAKE) --build .
+
+$(build_libdir)/libhsail.a: HSAIL-Tools/libHSAIL/build/libhsail.a
+	cd HSAIL-Tools/libHSAIL/build && \
+	$(CMAKE) -DCMAKE_INSTALL_PREFIX="$(build_prefix)" -P cmake_install.cmake
+
+#LLVM_CMAKE += -DCMAKE_INCLUDE_PATH="$(build_includedir)" \
+			  -DCMAKE_LIBRARY_PATH="$(build_libdir)"
 
 ## LIBUV ##
 LIBUV_GIT_URL=git://github.com/JuliaLang/libuv.git
