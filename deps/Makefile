@@ -350,10 +350,13 @@ endif # LLVM_VER != svn
 LLVM_CXXFLAGS = $(CXXFLAGS)
 LLVM_CPPFLAGS = $(CPPFLAGS)
 LLVM_LDFLAGS = $(LDFLAGS)
-LLVM_CMAKE_TARGETS += host
-LLVM_TARGET_FLAGS = --enable-targets=$(subst ;,,,$(LLVM_CMAKE_TARGETS))
-LLVM_CMAKE = -DCMAKE_BUILD_TYPE=$(LLVM_CMAKE_BUILDTYPE) -DLLVM_TARGETS_TO_BUILD=$(LLVM_CMAKE_TARGETS) -DLLVM_BUILD_BINDINGS=OFF -DLLVM_BUILD_DOCS=OFF -DLLVM_ENABLE_PEDANTIC=OFF
-LLVM_FLAGS += --disable-profiling --enable-static $(LLVM_TARGET_FLAGS) --disable-bindings --disable-docs
+LLVM_TARGETS = host
+LLVM_NULL :=
+LLVM_SPACE := $(LLVM_NULL) #
+LLVM_COMMA := ,
+LLVM_TARGET_LIST = $(subst $(LLVM_SPACE),;,$(strip $(LLVM_TARGETS)))
+LLVM_CMAKE = -DCMAKE_BUILD_TYPE=$(LLVM_CMAKE_BUILDTYPE) -DLLVM_TARGETS_TO_BUILD="$(LLVM_TARGET_LIST)" -DLLVM_BUILD_BINDINGS=OFF -DLLVM_BUILD_DOCS=OFF -DLLVM_ENABLE_PEDANTIC=OFF -Wno-dev
+LLVM_FLAGS += --disable-profiling --enable-static --enable-targets=$(LLVM_TARGET_LIST) --disable-bindings --disable-docs
 # LLVM has weird install prefixes (see $(LLVM_BUILDDIR)/Makefile.config for the full list)
 # We map them here to the "normal" ones, which means just prefixing "PROJ_" to the variable name.
 LLVM_MFLAGS = PROJ_libdir=$(build_libdir) PROJ_bindir=$(build_bindir) PROJ_includedir=$(build_includedir)
@@ -643,6 +646,37 @@ endif
 	touch -c $@
 # end target llvm-$(LLVM_VER)/configure
 
+ifeq ($(LLVM_CMAKE_BUILD),1)
+ifeq ($(LLVM_TARGET_HSAIL),1)
+LLVM_TARGETS += HSAIL
+
+LLVM_GIT_URL_HSAIL_TOOLS ?= git@github.com:HSAFoundation/HSAIL-Tools.git
+
+HSAIL-Tools/libHSAIL/CMakeLists.txt:
+	([ ! -d HSAIL-Tools ] && \
+		git clone $(LLVM_GIT_URL_HSAIL_TOOLS) HSAIL-Tools ) || \
+	(cd HSAIL-Tools && \
+		git pull --ff-only)
+
+HSAIL-Tools/libHSAIL/build/configured: HSAIL-Tools/libHSAIL/CMakeLists.txt
+	mkdir -p HSAIL-Tools/libHSAIL/build && \
+	cd HSAIL-Tools/libHSAIL/build && \
+	$(CMAKE) -G"$(LLVM_CMAKE_GENERATOR)" \
+			 $(CMAKE_COMMON) ..
+	touch -c $@
+
+$(build_libdir)/libhsail.a: HSAIL-Tools/libHSAIL/build/configured
+	cd HSAIL-Tools/libHSAIL/build && \
+	$(LLVM_CMAKE_GEN_BINARY) && \
+	$(LLVM_CMAKE_GEN_BINARY) install
+
+LLVM_CMAKE += -DCMAKE_INCLUDE_PATH="$(build_includedir)" \
+			  -DCMAKE_LIBRARY_PATH="$(build_libdir)"
+LLVM_CMAKE_TARGET_DEPS += $(build_libdir)/libhsail.a
+
+endif
+endif
+
 $(LLVM_BUILDDIR)/config.status: llvm-$(LLVM_VER)/configure | $(llvm_python_workaround) $(LIBCXX_DEPENDENCY)
 	cd llvm-$(LLVM_VER) && \
 	mkdir -p build_$(LLVM_BUILDTYPE) && cd build_$(LLVM_BUILDTYPE) && \
@@ -654,13 +688,14 @@ ifeq ($(LLVM_CMAKE_BUILD),1)
 LLVM_CMAKE_GENERATOR ?= Ninja
 LLVM_CMAKE_GEN_BINARY ?= ninja
 
-$(LLVM_BUILDDIR)/CMakeCache.txt: llvm-$(LLVM_VER)/configure | $(llvm_python_workaround)
+$(LLVM_BUILDDIR)/configured: llvm-$(LLVM_VER)/configure | $(llvm_python_workaround) $(LLVM_CMAKE_TARGET_DEPS)
 	cd llvm-$(LLVM_VER) && \
 	mkdir -p build_$(LLVM_BUILDTYPE) && cd build_$(LLVM_BUILDTYPE) && \
 	export PATH=$(abspath llvm-$(LLVM_VER)/python2_path):$$PATH && \
 	$(CMAKE) -G"$(LLVM_CMAKE_GENERATOR)" $(CMAKE_COMMON) $(LLVM_CMAKE) ..
+	touch -c $@
 
-$(LLVM_OBJ_SOURCE): $(LLVM_BUILDDIR)/CMakeCache.txt
+$(LLVM_OBJ_SOURCE): $(LLVM_BUILDDIR)/configured
 	cd $(LLVM_BUILDDIR) && \
 	export PATH=$(abspath llvm-$(LLVM_VER)/python2_path):$$PATH && \
 	$(LLVM_CMAKE_GEN_BINARY)
@@ -681,8 +716,7 @@ clean-llvm:
 	-$(MAKE) -C $(LLVM_BUILDDIR) clean
 	-rm -f $(build_bindir)/llvm-config
 $(LLVM_OBJ_TARGET): $(LLVM_OBJ_SOURCE) | $(llvm_python_workaround)
-	export PATH=$(abspath llvm-$(LLVM_VER)/python2_path):$$PATH && \
-	$(call make-install,$(LLVM_BUILDDIR),$(LLVM_MFLAGS))
+	$(call make-install,llvm-$(LLVM_VER)/build_$(LLVM_BUILDTYPE),$(LLVM_MFLAGS) PATH="$(abspath llvm-$(LLVM_VER)/python2_path):$$PATH")
 	touch -c $@
 endif # LLVM_CMAKE_BUILD
 
@@ -693,10 +727,6 @@ ifeq ($(OS),$(BUILD_OS))
 	$(MAKE) $(LLVM_MFLAGS) check
 endif
 	echo 1 > $@
-
-$(LLVM_OBJ_TARGET): $(LLVM_OBJ_SOURCE) | $(llvm_python_workaround)
-	$(call make-install,llvm-$(LLVM_VER)/build_$(LLVM_BUILDTYPE),$(LLVM_MFLAGS) PATH="$(abspath llvm-$(LLVM_VER)/python2_path):$$PATH")
-	touch -c $@
 
 reinstall-llvm:
 	-rm $(LLVM_OBJ_TARGET)
