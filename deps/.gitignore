@@ -29,6 +29,7 @@
 /julia-env
 /objconv*
 /Rmath-julia*
+/HSAIL-*
 
 # git-externals:
 /libgit2
