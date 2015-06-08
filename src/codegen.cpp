@@ -74,6 +74,16 @@
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 
+// For device targets
+#include <llvm/Support/FileSystem.h>
+#include <llvm/Transforms/IPO/PassManagerBuilder.h>
+#include <llvm/Transforms/IPO.h>
+#ifdef LLVM35
+#include <llvm/Linker/Linker.h>
+#else
+#include <llvm/Linker.h>
+#endif
+
 #if defined(_OS_WINDOWS_) && !defined(NOMINMAX)
 #define NOMINMAX
 #endif
@@ -527,6 +537,13 @@ struct jl_gcinfo_t {
     std::vector<Instruction*> gc_frame_pops;
 };
 
+enum codegen_target {
+    HOST = -1,
+    PTX = 0,
+	SPIR,
+	HSAIL
+};
+
 // information about the context of a piece of code: its enclosing
 // function and module, and visible local variables and labels.
 typedef struct {
@@ -559,6 +576,7 @@ typedef struct {
     llvm::DIBuilder *dbuilder;
     bool debug_enabled;
     std::vector<CallInst*> to_inline;
+    codegen_target target;
 } jl_codectx_t;
 
 typedef struct {
@@ -3457,8 +3475,9 @@ static void allocate_gc_frame(size_t n_roots, BasicBlock *b0, jl_codectx_t *ctx)
     gc->storeFrameSize =
         builder.CreateStore(ConstantInt::get(T_size, n_roots<<1),
                             builder.CreateBitCast(builder.CreateConstGEP1_32(gc->gcframe, 0), T_psize));
+                            preserving_bitcast(builder.CreateConstGEP1_32(gc->gcframe, 0), T_psize));
     builder.CreateStore(builder.CreateLoad(prepare_global(jlpgcstack_var), false),
-                        builder.CreateBitCast(builder.CreateConstGEP1_32(gc->gcframe, 1), PointerType::get(jl_ppvalue_llvmt,0)));
+                        preserving_bitcast(builder.CreateConstGEP1_32(gc->gcframe, 1), PointerType::get(jl_ppvalue_llvmt,0)));
     Instruction *linst = builder.CreateStore(gc->gcframe, prepare_global(jlpgcstack_var), false);
     gc->argSpaceInits = &b0->back();
 #else
@@ -3871,6 +3890,30 @@ static Function *gen_jlcall_wrapper(jl_lambda_info_t *lam, jl_expr_t *ast, Funct
     return w;
 }
 
+codegen_target target_from_symbol(jl_sym_t* sym)
+{
+    if (sym == null_sym || sym == jl_symbol("host"))
+	{
+        return HOST;
+	}
+    else if (sym == jl_symbol("ptx"))
+	{
+        ctx.target = PTX;
+	}
+    else if (sym == jl_symbol("spir"))
+	{
+        ctx.target = SPIR;
+	}
+    else if (sym == jl_symbol("hsail"))
+	{
+        ctx.target = HSAIL;
+	}
+    else
+	{
+        jl_error((std::string("unknown codegen target ") + sym->name).c_str());
+	}
+}
+
 // cstyle = compile with c-callable signature, not jlcall
 static Function *emit_function(jl_lambda_info_t *lam)
 {
@@ -3900,6 +3943,8 @@ static Function *emit_function(jl_lambda_info_t *lam)
     ctx.vaName = NULL;
     ctx.vaStack = false;
     ctx.boundsCheck.push_back(true);
+	ctx.target = target_from_symbol(ctx.linfo->target);
+
 
     // step 2. process var-info lists to see what vars are captured, need boxing
     jl_value_t *gensym_types = jl_lam_gensyms(ast);
@@ -4093,7 +4138,8 @@ static Function *emit_function(jl_lambda_info_t *lam)
 #endif
 
 #ifdef JL_DEBUG_BUILD
-    f->addFnAttr(Attribute::StackProtectReq);
+    if (ctx.target == HOST)
+        f->addFnAttr(Attribute::StackProtectReq);
 #endif
     ctx.f = f;
 
@@ -5541,6 +5587,15 @@ static void init_julia_llvm_env(Module *m)
     FPM->doInitialization();
 }
 
+extern "C" void jl_init_llvm(void)
+{
+    InitializeAllTargets();
+    InitializeAllTargetInfos();
+    InitializeAllTargetMCs();
+    InitializeAllAsmPrinters();
+    InitializeAllAsmParsers();
+}
+
 extern "C" void jl_init_codegen(void)
 {
 #if defined(_OS_WINDOWS_) && defined(_CPU_X86_64_)
@@ -5560,10 +5615,6 @@ extern "C" void jl_init_codegen(void)
     // this option disables LLVM's signal handlers
     llvm::DisablePrettyStackTrace = true;
 #endif
-
-    InitializeNativeTarget();
-    InitializeNativeTargetAsmPrinter();
-    InitializeNativeTargetAsmParser();
 
     Module *m, *engine_module;
 
