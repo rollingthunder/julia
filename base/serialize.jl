@@ -333,6 +333,7 @@ function serialize(s::SerializationState, linfo::LambdaStaticData)
     serialize(s, linfo.sparams)
     serialize(s, linfo.inferred)
     serialize(s, linfo.module)
+    serialize(s, linfo.target)
     if isdefined(linfo, :capt)
         serialize(s, linfo.capt)
     else
@@ -543,12 +544,14 @@ function deserialize(s::SerializationState, ::Type{LambdaStaticData})
     sparams = deserialize(s)
     infr = deserialize(s)
     mod = deserialize(s)
+    target = deserialize(s)
     capt = deserialize(s)
     if makenew
         linfo.ast = ast
         linfo.sparams = sparams
         linfo.inferred = infr
         linfo.module = mod
+        linfo.target = target
         linfo.roots = roots
         if !is(capt,nothing)
             linfo.capt = capt

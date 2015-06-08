@@ -1411,4 +1411,5 @@ export
     @assert,
     @enum,
     @label,
-    @goto
+    @goto,
+    @target
