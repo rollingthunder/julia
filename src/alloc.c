@@ -350,6 +350,7 @@ jl_lambda_info_t *jl_new_lambda_info(jl_value_t *ast, jl_svec_t *sparams, jl_mod
         }
     }
     li->module = ctx;
+    li->target = null_sym;
     li->sparams = sparams;
     li->tfunc = jl_nothing;
     li->fptr = &jl_trampoline;

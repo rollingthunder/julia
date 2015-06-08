@@ -1694,6 +1694,13 @@ function typeinf_uncached(linfo::LambdaStaticData, atypes::ANY, sparams::SimpleV
     end
     fulltree = type_annotate(ast, s, sv, frame.result, args)
 
+    # read target meta information
+	found, target = popmeta!(fulltree.args[3], :target)
+	if found
+		@assert length(target) == 1
+		linfo.target = target[1]
+	end
+
     if !rec
         @assert fulltree.args[3].head === :body
         if optimize
