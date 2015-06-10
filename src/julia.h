@@ -175,6 +175,14 @@ typedef jl_value_t *(*jl_fptr_t)(jl_value_t*, jl_value_t**, uint32_t);
 
 typedef struct _jl_datatype_t jl_tupletype_t;
 
+enum codegen_target {
+    HOST = -1,
+    PTX = 0,
+	SPIR,
+	HSAIL,
+	LAST_TARGET
+};
+
 typedef struct _jl_lambda_info_t {
     JL_DATA_TYPE
     // this holds the static data for a function:
@@ -209,6 +217,8 @@ typedef struct _jl_lambda_info_t {
     jl_fptr_t fptr;             // jlcall entry point
     void *functionObject;       // jlcall llvm Function
     void *cFunctionList;        // c callable llvm Functions
+
+	void *targetFunctionObjects[LAST_TARGET]; // compiled accelerator functions
 
     // specialized llvm Function (common core for the other two)
     void *specFunctionObject;
