@@ -3963,15 +3963,15 @@ codegen_target target_from_symbol(jl_sym_t* sym)
 	}
     else if (sym == jl_symbol("ptx"))
 	{
-        ctx.target = PTX;
+        return PTX;
 	}
     else if (sym == jl_symbol("spir"))
 	{
-        ctx.target = SPIR;
+        return SPIR;
 	}
     else if (sym == jl_symbol("hsail"))
 	{
-        ctx.target = HSAIL;
+        return HSAIL;
 	}
     else
 	{
