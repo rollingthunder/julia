@@ -18,6 +18,9 @@
 #define __STDC_CONSTANT_MACROS
 #endif
 
+#include <memory>
+
+#include "llvm-version.h"
 #include <llvm/ExecutionEngine/ExecutionEngine.h>
 #include <llvm/ExecutionEngine/JITEventListener.h>
 #include <llvm/IR/IntrinsicInst.h>
@@ -175,6 +178,10 @@ static Module *jl_Module;
 static MDBuilder *mbuilder;
 static std::map<int, std::string> argNumberStrings;
 static FunctionPassManager *FPM;
+
+// device target code-gen
+class CodeGenContext;
+static CodeGenContext* targetCodeGenContexts[LAST_TARGET];
 
 #ifdef LLVM37
 // No DataLayout pass needed anymore.
@@ -367,6 +374,18 @@ extern "C" DLLEXPORT void jl_gc_wb_slow(jl_value_t* parent, jl_value_t* ptr)
 }
 
 // --- code generation ---
+
+class CodeGenContext
+{
+public:
+	// commmon components for a device target codegen
+	std::unique_ptr<PassManager> PM;
+	std::unique_ptr<FunctionPassManager> FPM;
+	TargetMachine* TM;
+
+	virtual Module* getModuleFor(jl_lambda_info_t* li) = 0;
+	virtual ~CodeGenContext() {}
+};
 
 // per-local-variable information
 struct jl_varinfo_t {
@@ -596,6 +615,7 @@ typedef struct {
     bool debug_enabled;
     std::vector<CallInst*> to_inline;
     codegen_target target;
+	CodeGenContext* codegen;
 } jl_codectx_t;
 
 typedef struct {
@@ -809,6 +829,181 @@ static Function *to_function(jl_lambda_info_t *li)
     JL_SIGATOMIC_END();
     return f;
 }
+
+class SPIRCodeGenContext : public CodeGenContext
+{
+public:
+	std::map<jl_lambda_info_t*, Module*> Modules;
+
+	Module* getModuleFor(jl_lambda_info_t* li) override {
+		auto M = new Module(li->name->name, getGlobalContext());
+
+		Modules[li] = M;
+
+		return M;
+	}
+
+	~SPIRCodeGenContext() override {
+		for(const auto& KV : Modules) {
+			delete KV.second;
+		}
+	}
+};
+
+#define spir_ctx() ((SPIRCodeGenContext*) targetCodeGenContexts[SPIR])
+
+extern "C" void init_spir_codegen(void)
+{
+    if (spir_ctx() != nullptr)
+	{
+        jl_error("cannot re-initialize SPIR codegen, destroy the existing one first");
+	}
+	auto ctx = std::unique_ptr<SPIRCodeGenContext>( new SPIRCodeGenContext());
+
+	std::string TheTriple("spir64-unknown-unknown");
+
+	std::string Error;
+	auto TheTarget = TargetRegistry::lookupTarget(TheTriple,
+			Error);
+	if (!TheTarget) {
+		jl_error("couldn't retrieve SPIR target");
+	}
+    auto TM = TheTarget->createTargetMachine(
+        TheTriple, /*CPU*/ "", "", TargetOptions(),
+        Reloc::PIC_, CodeModel::Default, CodeGenOpt::Aggressive);
+
+    if (!TM)
+        jl_error("Could not create SPIR target machine");
+    TM->setAsmVerbosityDefault(true);
+
+    auto PM = std::unique_ptr<PassManager>( new PassManager());
+
+    // Add the target data from the target machine
+    PM->add(new DataLayoutPass());
+
+    // Eliminate all unused functions
+    PM->add(createGlobalOptimizerPass());
+    PM->add(createStripDeadPrototypesPass());
+
+	// Inline all functions with always_inline attribute
+    PM->add(createAlwaysInlinerPass());
+
+    auto FPM = std::unique_ptr<FunctionPassManager>( new FunctionPassManager(nullptr /*M*/));
+
+    // Enqueue standard optimizations
+    PassManagerBuilder PMB;
+    PMB.OptLevel = CodeGenOpt::Aggressive;
+    PMB.populateFunctionPassManager(*FPM);
+
+	ctx->TM = std::move(TM);
+	ctx->FPM = std::move(FPM);
+	ctx->PM = std::move(PM);
+
+	targetCodeGenContexts[SPIR] = ctx.release();
+}
+
+static Module* load_hsail_intrinsics()
+{
+    const auto SearchPath = std::vector<const char*>{
+		"/opt/amd/bin",
+		getenv("HSA_BUILTINS_PATH"),
+		getenv("HSA_RUNTIME_PATH")
+	};
+	const auto FileName = "builtins-hsail.sign.bc";
+
+	std::error_code ec;
+    std::unique_ptr<MemoryBuffer> MB;
+
+    bool isDir = false;
+    for (const auto D : SearchPath) {
+        if (D == NULL)
+            continue;
+
+        ec = sys::fs::is_directory(D, isDir);
+        if (!ec && isDir) {
+			const auto FilePath = std::string(D) + FileName;
+			auto MBoE = MemoryBuffer::getFile(FilePath);
+			if((ec = MBoE.getError()))
+			{
+				MB = std::move(*MBoE);
+				break;
+			}
+        }
+    }
+
+    if (ec)
+	{
+        jl_errorf("Cannot open HSAIL builtins bitcode file: %s",
+                  ec.message().c_str());
+	}
+    auto M2OrError = parseBitcodeFile(MB->getMemBufferRef(),
+                                                  getGlobalContext());
+
+    if (std::error_code ec = M2OrError.getError())
+	{
+        jl_errorf("could not parse device library: %s", ec.message().c_str());
+	}
+
+	return *M2OrError;
+}
+
+static Function *to_spir(jl_lambda_info_t *li)
+{
+	auto CTX = spir_ctx();
+
+	auto F = (Function*)li->functionObject;
+
+	auto M = F->getParent();
+
+	auto PM = std::unique_ptr<PassManager>( new PassManager());
+#if defined(LLVM36)
+	PM->add(new DataLayoutPass());
+#else
+	jl_errorf("SPIR Target not supported on your version of LLVM");
+#endif
+	PM->add(createInternalizePass({ F->getName().data() }));
+	PM->run(*M);
+
+    // Run common passes
+    for (auto F = M->begin(), E = M->end(); F != E; ++F) {
+        CTX->FPM->run(*F);
+	}
+    CTX->PM->run(*M);
+
+	return F;
+}
+
+#if HAS_HSA
+
+#define hsail_ctx() ((HSAILCodeGenContext*) targetCodeGenContexts[HSAIL])
+
+static void* to_brig(jl_lambda_info_t* li)
+{
+    M2->setTargetTriple(M->getTargetTriple());
+#ifdef LLVM36
+    // TODO: use the DiagnosticHandler
+    if (Linker::LinkModules(M, M2))
+        jl_error("Could not link device library");
+#else
+	jl_error("unsupported LLVM");
+#endif
+    delete M2;
+
+
+    // Write the assembly
+    std::string code;
+    llvm::raw_string_ostream stream(code);
+    llvm::formatted_raw_ostream fstream(stream);
+    CTX->TM->addPassesToEmitFile(
+        *PM, fstream, TargetMachine::CGFT_AssemblyFile, true, 0, 0);
+    PM->run(*M);
+    fstream.flush();
+    stream.flush();
+
+	// TODO: return BRIG
+	return nullptr;
+}
+#endif
 
 static void jl_setup_module(Module *m, bool add)
 {
@@ -4006,7 +4201,11 @@ static Function *emit_function(jl_lambda_info_t *lam)
     ctx.vaStack = false;
     ctx.boundsCheck.push_back(true);
 	ctx.target = target_from_symbol(ctx.linfo->target);
-
+	ctx.codegen = targetCodeGenContexts[ctx.target];
+	if (ctx.target != HOST && ctx.codegen == nullptr) {
+		jl_error("requested codegen is not initialized");
+		ctx.target = HOST;
+	}
 
     // step 2. process var-info lists to see what vars are captured, need boxing
     jl_value_t *gensym_types = jl_lam_gensyms(ast);
@@ -4105,19 +4304,23 @@ static Function *emit_function(jl_lambda_info_t *lam)
     funcName << "julia_" << lam->name->name;
 
     Module *m;
+	if (ctx.target == HOST) {
 #ifdef USE_MCJIT
-    if (!imaging_mode) {
-        m = new Module(funcName.str(), jl_LLVMContext);
-        jl_setup_module(m,true);
-    }
-    else {
-        m = shadow_module;
-    }
-    // clear the list of llvmcall declarations as we'll be using a clean module
-    llvmcallDecls.clear();
+		if (!imaging_mode) {
+			m = new Module(funcName.str(), jl_LLVMContext);
+			jl_setup_module(m,true);
+		}
+		else {
+			m = shadow_module;
+		}
+		// clear the list of llvmcall declarations as we'll be using a clean module
+		llvmcallDecls.clear();
 #else
-    m = jl_Module;
+		m = jl_Module;
 #endif
+	} else {
+		m = ctx.codegen->getModuleFor(ctx.linfo);
+	}
     funcName << "_" << globalUnique++;
 
     if (specsig) { // assumes !va
