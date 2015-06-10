@@ -1,6 +1,9 @@
 // This file is a part of Julia. License is MIT: http://julialang.org/license
 
 // utility procedures used in code generation
+#define DEBUG_IF(COND, CODE) \
+    if(COND) { CODE; }
+#define DEBUG_DCG 0
 
 #if defined(USE_MCJIT) && defined(_OS_WINDOWS_)
 template<class T> // for GlobalObject's
@@ -1068,22 +1071,49 @@ static void error_unless(Value *cond, const std::string &msg, jl_codectx_t *ctx)
     builder.SetInsertPoint(passBB);
 }
 
+static void emit_trap(jl_codectx_t* ctx)
+{
+    llvm::Value *Trap =
+        Intrinsic::getDeclaration(ctx->f->getParent(), Intrinsic::trap);
+    CallInst *TrapCall = builder.CreateCall(Trap, ArrayRef<Value*>());
+    TrapCall->setDoesNotReturn();
+    TrapCall->setDoesNotThrow();
+}
+
+static void emit_debugtrap(jl_codectx_t* ctx)
+{
+    llvm::Value *Trap =
+        Intrinsic::getDeclaration(ctx->f->getParent(), Intrinsic::debugtrap);
+    CallInst *TrapCall = builder.CreateCall(Trap, ArrayRef<Value*>());
+    TrapCall->setDoesNotReturn();
+    TrapCall->setDoesNotThrow();
+}
 static void raise_exception_unless(Value *cond, Value *exc, jl_codectx_t *ctx)
 {
     BasicBlock *failBB = BasicBlock::Create(getGlobalContext(),"fail",ctx->f);
     BasicBlock *passBB = BasicBlock::Create(getGlobalContext(),"pass");
     builder.CreateCondBr(cond, passBB, failBB);
     builder.SetInsertPoint(failBB);
+    if (ctx->target != HOST) {
+        // TODO: pass exception details (type, lineno, ...)
+        DEBUG_IF(DEBUG_DCG, errs() << "Device CodeGen: Emitting Trap instead of exception\n");
+        emit_trap(ctx);
+        //ctx->f->dump();
+    } else {
 #ifdef LLVM37
     builder.CreateCall(prepare_call(jlthrow_line_func), { exc,
                         ConstantInt::get(T_int32, ctx->lineno) });
 #else
     builder.CreateCall2(prepare_call(jlthrow_line_func), exc,
-                        ConstantInt::get(T_int32, ctx->lineno));
+                         ConstantInt::get(T_int32, ctx->lineno));
 #endif
+    }
     builder.CreateUnreachable();
     ctx->f->getBasicBlockList().push_back(passBB);
     builder.SetInsertPoint(passBB);
+    if (ctx->target != HOST){
+        //ctx->f->dump();
+    }
 }
 
 static void raise_exception_unless(Value *cond, GlobalVariable *exc,
@@ -1687,7 +1717,7 @@ static Value *emit_array_nd_index(Value *a, jl_value_t *ex, size_t nd, jl_value_
             Value *d =
                 k >= nd ? ConstantInt::get(T_size, 1) : emit_arraysize(a, ex, k+1, ctx);
 #if CHECK_BOUNDS==1
-            if (bc) {
+            if (bc && ctx->target == HOST) {
                 BasicBlock *okBB = BasicBlock::Create(getGlobalContext(), "ib");
                 // if !(i < d) goto error
                 builder.CreateCondBr(builder.CreateICmpULT(ii, d), okBB, failBB);
@@ -1700,22 +1730,35 @@ static Value *emit_array_nd_index(Value *a, jl_value_t *ex, size_t nd, jl_value_
     }
 #if CHECK_BOUNDS==1
     if (bc) {
-        Value *alen = emit_arraylen(a, ex, ctx);
-        // if !(i < alen) goto error
-        builder.CreateCondBr(builder.CreateICmpULT(i, alen), endBB, failBB);
+        if (ctx->target != HOST) {
+            // if idx >= 0 goto end
+            Value *min_idx = ConstantInt::get(T_size, 0);
+            builder.CreateCondBr(builder.CreateICmpSGE(i, min_idx), endBB, failBB);
 
-        ctx->f->getBasicBlockList().push_back(failBB);
-        builder.SetInsertPoint(failBB);
-        // CreateAlloca is OK here since we are on an error branch
-        Value *tmp = builder.CreateAlloca(T_size, ConstantInt::get(T_size, nidxs));
-        for(size_t k=0; k < nidxs; k++) {
-            builder.CreateStore(idxs[k], builder.CreateGEP(tmp, ConstantInt::get(T_size, k)));
-        }
+            ctx->f->getBasicBlockList().push_back(failBB);
+            builder.SetInsertPoint(failBB);
+
+            // TODO: pass exception details (type, lineno, ...)
+			DEBUG_IF(DEBUG_DCG, errs() << "Device CodeGen: Emitting Trap instead of bounds check\n");
+			emit_trap(ctx);
+        } else {
+			Value *alen = emit_arraylen(a, ex, ctx);
+			// if !(i < alen) goto error
+			builder.CreateCondBr(builder.CreateICmpULT(i, alen), endBB, failBB);
+
+			ctx->f->getBasicBlockList().push_back(failBB);
+			builder.SetInsertPoint(failBB);
+			// CreateAlloca is OK here since we are on an error branch
+			Value *tmp = builder.CreateAlloca(T_size, ConstantInt::get(T_size, nidxs));
+			for(size_t k=0; k < nidxs; k++) {
+				builder.CreateStore(idxs[k], builder.CreateGEP(tmp, ConstantInt::get(T_size, k)));
+			}
 #ifdef LLVM37
-        builder.CreateCall(prepare_call(jlboundserrorv_func), { a, tmp, ConstantInt::get(T_size, nidxs) });
+            builder.CreateCall(prepare_call(jlboundserrorv_func), { a, tmp, ConstantInt::get(T_size, nidxs) });
 #else
-        builder.CreateCall3(prepare_call(jlboundserrorv_func), a, tmp, ConstantInt::get(T_size, nidxs));
+            builder.CreateCall3(prepare_call(jlboundserrorv_func), a, tmp, ConstantInt::get(T_size, nidxs));
 #endif
+        }
         builder.CreateUnreachable();
 
         ctx->f->getBasicBlockList().push_back(endBB);

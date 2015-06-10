@@ -1425,6 +1425,12 @@ function typeinf_uncached(linfo::LambdaStaticData, atypes::ANY, sparams::SimpleV
         ast = linfo.ast
     end
 
+	# enable debug output for marked functions
+	dbg = false
+	if linfo.name == :kernel_f
+		dbg = true
+	end
+
     args = f_argnames(ast)
     la = length(args)
     assert(is(ast.head,:lambda))
@@ -1695,11 +1701,11 @@ function typeinf_uncached(linfo::LambdaStaticData, atypes::ANY, sparams::SimpleV
     fulltree = type_annotate(ast, s, sv, frame.result, args)
 
     # read target meta information
-    target = popmeta!(fulltree.args[3], :target)
-    if target[1]
-        @assert length(target[2]) == 1
-        linfo.target = target[2][1]
-    end
+	found, target = popmeta!(fulltree.args[3], :target)
+	if found
+		@assert length(target) == 1
+		linfo.target = target[1]
+	end
 
     if !rec
         @assert fulltree.args[3].head === :body

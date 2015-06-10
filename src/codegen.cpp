@@ -18,6 +18,9 @@
 #define __STDC_CONSTANT_MACROS
 #endif
 
+#include <memory>
+
+#include "llvm-version.h"
 #include <llvm/ExecutionEngine/ExecutionEngine.h>
 #include <llvm/ExecutionEngine/JITEventListener.h>
 #include <llvm/IR/IntrinsicInst.h>
@@ -189,6 +192,10 @@ static legacy::FunctionPassManager *FPM;
 #else
 static FunctionPassManager *FPM;
 #endif
+
+// device target code-gen
+class CodeGenContext;
+static CodeGenContext* targetCodeGenContexts[LAST_TARGET];
 
 #ifdef LLVM37
 // No DataLayout pass needed anymore.
@@ -380,7 +387,6 @@ extern "C" DLLEXPORT void jl_gc_wb_slow(jl_value_t* parent, jl_value_t* ptr)
 }
 
 // --- code generation ---
-
 // per-local-variable information
 struct jl_varinfo_t {
     Value *memvalue;  // an address, if the var is alloca'd
@@ -487,7 +493,16 @@ typedef struct {
     bool debug_enabled;
     std::vector<CallInst*> to_inline;
     codegen_target target;
+    CodeGenContext* codegen;
 } jl_codectx_t;
+
+namespace std {
+    template< class T, class... Args >
+    unique_ptr<T> make_unique( Args&&... args )
+    {
+        return unique_ptr<T>(new T(std::forward<Args>(args)...));
+    }
+}
 
 typedef struct {
     size_t len;
@@ -637,6 +652,53 @@ static void maybe_alloc_arrayvar(jl_sym_t *s, jl_codectx_t *ctx)
 }
 
 // --- entry point ---
+
+#include "codegen_base.cpp"
+#include "codegen_spir.cpp"
+#include "codegen_hsail.cpp"
+
+codegen_target target_from_symbol(jl_sym_t* sym);
+
+extern "C" DLLEXPORT
+bool jl_has_device_target(jl_sym_t* sym)
+{
+    auto target = target_from_symbol(sym);
+
+    switch(target)
+    {
+        case HOST:
+        case SPIR:
+        case HSAIL:
+            return true;
+        default:
+            return false;
+    }
+}
+
+extern "C" DLLEXPORT
+bool jl_init_device_codegen(jl_sym_t* sym)
+{
+    auto target = target_from_symbol(sym);
+
+    switch(target)
+    {
+        case HOST:
+            jl_printf(JL_STDERR, "Warning: You do not need to explicitly initialize the HOST codegen");
+            break;
+        case SPIR:
+            jl_init_spir_codegen();
+            break;
+        case HSAIL:
+            jl_init_hsail_codegen();
+            break;
+        default:
+            jl_printf(JL_STDERR, "Warning: Cannot initialize unknown codegen '%s'", sym->name);
+            return false;
+            break;
+    }
+    return true;
+}
+
 //static int n_emit=0;
 static Function *emit_function(jl_lambda_info_t *lam);
 //static int n_compile=0;
@@ -2288,6 +2350,11 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                         assert(((jl_datatype_t*)ety)->instance != NULL);
                         return literal_pointer_val(((jl_datatype_t*)ety)->instance);
                     }
+                    if (ctx->target != HOST) {
+                        // TODO: Move into CodeGenContext
+                        Value *vptr = builder.CreateGEP(ary, idx);
+                        return builder.CreateLoad(vptr, false);
+                    }
                     return typed_load(emit_arrayptr(ary, args[1], ctx), idx, ety, ctx, tbaa_user);
                 }
             }
@@ -2342,8 +2409,14 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                             data_owner->addIncoming(ary, curBB);
                             data_owner->addIncoming(own_ptr, ownedBB);
                         }
-                        typed_store(emit_arrayptr(ary,args[1],ctx), idx, v,
+                        if (ctx->target != HOST) {
+                            // TODO: Move into CodegenContext
+                            typed_store(ary, idx, v, ety, ctx, tbaa_user, data_owner);
+                        }
+                        else {
+                            typed_store(emit_arrayptr(ary,args[1],ctx), idx, v,
                                     ety, ctx, tbaa_user, data_owner);
+                        }
                     }
                     JL_GC_POP();
                     return ary;
@@ -3827,7 +3900,10 @@ static Function *gen_cfun_wrapper(jl_function_t *ff, jl_value_t *jlrettype, jl_t
         builder.CreateRetVoid();
     else
         builder.CreateRet(r);
+
     finalize_gc_frame(&ctx);
+
+
 
 #ifdef JL_DEBUG_BUILD
 #ifdef LLVM35
@@ -3954,29 +4030,73 @@ static Function *gen_jlcall_wrapper(jl_lambda_info_t *lam, jl_expr_t *ast, Funct
 
     return w;
 }
+Function* CodeGenContext::generateWrapper(jl_lambda_info_t* li, jl_expr_t* ast, Function* f) {
+    const std::string &fname = f->getName().str();
+
+    DEBUG_IF(DEBUG_DCG, errs() << "Device Codegen: Generating jlcall dummy wrapper for "
+           << fname << "\n");
+
+    std::stringstream funcName;
+    funcName << "jlcall_";
+    funcName << li->target->name;
+    funcName << "dummy_";
+    funcName << fname;
+
+    std::stringstream message;
+    message << "Function '" << fname << "' for target '"
+            << li->target->name << "' cannot be called from julia";
+
+    // Do not emit the wrapper into the device target module
+    auto M = new Module(funcName.str(), jl_LLVMContext);
+    jl_setup_module(M,true);
+
+    Function *w = Function::Create(jl_func_sig, imaging_mode ? GlobalVariable::InternalLinkage : GlobalVariable::ExternalLinkage,
+                                   funcName.str(), M);
+    addComdat(w);
+    Function::arg_iterator AI = w->arg_begin();
+    AI++; //const Argument &fArg = *AI++;
+    //Value *argArray = AI++;
+    //const Argument &argCount = *AI++;
+    BasicBlock *b0 = BasicBlock::Create(jl_LLVMContext, "top", w);
+
+    builder.SetInsertPoint(b0);
+    DebugLoc noDbg;
+    builder.SetCurrentDebugLocation(noDbg);
+
+    jl_codectx_t ctx;
+    ctx.linfo = li;
+
+    just_emit_error(message.str(), &ctx);
+    builder.CreateUnreachable();
+
+    return w;
+}
 
 codegen_target target_from_symbol(jl_sym_t* sym)
 {
     if (sym == null_sym || sym == jl_symbol("host"))
-	{
+    {
         return HOST;
-	}
-    else if (sym == jl_symbol("ptx"))
-	{
-        return PTX;
-	}
-    else if (sym == jl_symbol("spir"))
-	{
-        return SPIR;
-	}
-    else if (sym == jl_symbol("hsail"))
-	{
-        return HSAIL;
-	}
+    }
     else
-	{
-        jl_error((std::string("unknown codegen target ") + sym->name).c_str());
-	}
+    {
+        if (sym == jl_symbol("ptx"))
+        {
+            return PTX;
+        }
+        else if (sym == jl_symbol("spir"))
+        {
+            return SPIR;
+        }
+        else if (sym == jl_symbol("hsail"))
+        {
+            return HSAIL;
+        }
+        else
+        {
+            return UNKNOWN;
+        }
+    }
 }
 
 // Compile to LLVM IR, using a specialized signature if applicable.
@@ -4008,8 +4128,22 @@ static Function *emit_function(jl_lambda_info_t *lam)
     ctx.vaName = NULL;
     ctx.vaStack = false;
     ctx.boundsCheck.push_back(true);
-	ctx.target = target_from_symbol(ctx.linfo->target);
-
+    ctx.target = target_from_symbol(ctx.linfo->target);
+    ctx.codegen = targetCodeGenContexts[ctx.target];
+    if (ctx.target != HOST) {
+        if(ctx.codegen == nullptr) {
+            jl_init_device_codegen(ctx.linfo->target);
+            ctx.codegen = targetCodeGenContexts[ctx.target];
+            if (ctx.codegen == nullptr) {
+                jl_error("could not initialize the requested codegen\n");
+                ctx.target = HOST;
+            }
+        }
+        DEBUG_IF(DEBUG_DCG, jl_printf(JL_STDERR, "Compiling function  %s for target %s \n",
+                    lam->name->name,
+                    lam->target->name
+                ));
+    }
 
     // step 2. process var-info lists to see what vars are captured, need boxing
     jl_value_t *gensym_types = jl_lam_gensyms(ast);
@@ -4110,19 +4244,23 @@ static Function *emit_function(jl_lambda_info_t *lam)
     funcName << "julia_" << lam->name->name;
 
     Module *m;
+    if (ctx.target == HOST) {
 #ifdef USE_MCJIT
-    if (!imaging_mode) {
-        m = new Module(funcName.str(), jl_LLVMContext);
-        jl_setup_module(m,true);
-    }
-    else {
-        m = shadow_module;
-    }
-    // clear the list of llvmcall declarations as we'll be using a clean module
-    llvmcallDecls.clear();
+        if (!imaging_mode) {
+            m = new Module(funcName.str(), jl_LLVMContext);
+            jl_setup_module(m,true);
+        }
+        else {
+            m = shadow_module;
+        }
+        // clear the list of llvmcall declarations as we'll be using a clean module
+        llvmcallDecls.clear();
 #else
-    m = jl_Module;
+        m = jl_Module;
 #endif
+    } else {
+        m = ctx.codegen->getModuleFor(ctx.linfo);
+    }
     funcName << "_" << globalUnique++;
 
     ctx.sret = false;
@@ -4145,6 +4283,12 @@ static Function *emit_function(jl_lambda_info_t *lam)
                 ty = PointerType::get(ty,0);
             fsig.push_back(ty);
         }
+
+        if(ctx.target != HOST)
+        {
+            ctx.codegen->updateFunctionSignature(lam, funcName, fsig, rt);
+        }
+
         f = Function::Create(FunctionType::get(rt, fsig, false),
                              imaging_mode ? GlobalVariable::InternalLinkage : GlobalVariable::ExternalLinkage,
                              funcName.str(), m);
@@ -4156,7 +4300,11 @@ static Function *emit_function(jl_lambda_info_t *lam)
             lam->specFunctionID = jl_assign_functionID(f);
         }
         if (lam->functionObject == NULL) {
-            Function *fwrap = gen_jlcall_wrapper(lam, ast, f, ctx.sret);
+            Function *fwrap;
+            if (ctx.target != HOST)
+                fwrap = ctx.codegen->generateWrapper(lam, ast, f);
+            else
+                fwrap = gen_jlcall_wrapper(lam, ast, f, ctx.sret);
             lam->functionObject = (void*)fwrap;
             lam->functionID = jl_assign_functionID(fwrap);
         }
@@ -4193,6 +4341,10 @@ static Function *emit_function(jl_lambda_info_t *lam)
         f->addFnAttr(Attribute::StackProtectReq);
 #endif
     ctx.f = f;
+
+    if (ctx.target != HOST) {
+        ctx.codegen->addMetadata(f, ctx);
+    }
 
     // step 5. set up debug info context and create first basic block
     bool in_user_code = !jl_is_submodule(lam->module, jl_base_module) && !jl_is_submodule(lam->module, jl_core_module);
@@ -4475,6 +4627,15 @@ static Function *emit_function(jl_lambda_info_t *lam)
         if (store_unboxed_p(s, &ctx)) {
             alloc_local(s, &ctx);
         }
+        else if (ctx.target != HOST) {
+            // TODO: Move to CodeGenContext
+            jl_errorf("device target does not support boxing of function argument %s (inferred: %s, capt: %s, usedundef: %s)",
+                      s->name,
+                     (ctx.linfo->inferred) ? "true" : "false",
+                     (ctx.vars[s].isCaptured) ? "true" : "false",
+                     (ctx.vars[s].usedUndef) ? "true" : "false"
+                     );
+        }
         else if (ctx.vars[s].isAssigned || (va && i==largslen-1)) {
             n_roots++;
         }
@@ -4488,6 +4649,16 @@ static Function *emit_function(jl_lambda_info_t *lam)
             continue;
         if (store_unboxed_p(s, &ctx)) {
             alloc_local(s, &ctx);
+        }
+        else if (ctx.target != HOST) {
+            // TODO: Move to CodeGenContext
+            jl_errorf("device target does not support boxing of local variable %s (inferred: %s, capt: %s, usedundef: %s, typeisbits: %s, decltype: %s)",
+                      s->name,
+                     (ctx.linfo->inferred) ? "true" : "false",
+                     (ctx.vars[s].isCaptured) ? "true" : "false",
+                     (ctx.vars[s].usedUndef) ? "true" : "false",
+                     (isbits_spec(vi.declType,false)) ? "true" : "false"
+                    );
         }
         else {
             if (!vi.used) {
@@ -4859,6 +5030,12 @@ static Function *emit_function(jl_lambda_info_t *lam)
     // step 16. fix up size of stack root list
     finalize_gc_frame(&ctx);
 
+    if(ctx.target != HOST)
+    {
+        // Device IR output
+        // ctx.f->dump();
+    }
+
     // step 17, Apply LLVM level inlining
     for(std::vector<CallInst*>::iterator it = ctx.to_inline.begin(); it != ctx.to_inline.end(); ++it) {
         Function *inlinef = (*it)->getCalledFunction();
@@ -4868,6 +5045,10 @@ static Function *emit_function(jl_lambda_info_t *lam)
         inlinef->eraseFromParent();
     }
 
+    if(ctx.target != HOST)
+    {
+        DEBUG_IF(DEBUG_DCG, ctx.f->dump());
+    }
     // step 18. Perform any delayed instantiations
     if (ctx.debug_enabled)
         ctx.dbuilder->finalize();

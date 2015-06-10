@@ -138,7 +138,7 @@ function pushmeta!(ex::Expr, sym::Symbol, args::Any...)
 end
 
 function popmeta!(body::Expr, sym::Symbol)
-    body.head == :block || return false, []
+    body.head == :block || body.head == :body || return false, []
     found, metaex = findmeta_block(body)
     if !found
         return false, []
