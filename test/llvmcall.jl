@@ -71,7 +71,7 @@ end
 
 # Test whether declarations work properly
 # These tests only work properly for llvm 3.5+
-if convert(VersionNumber, Base.libllvm_version) > v"3.5-"
+if Base.libllvm_version == "svn" || convert(VersionNumber, Base.libllvm_version) > v"3.5-"
 
 function undeclared_ceil(x::Float64)
     llvmcall("""%2 = call double @llvm.ceil.f64(double %0)
@@ -95,7 +95,7 @@ end
 @test_approx_eq declared_floor(4.2) 4.
 
 # These tests only work properly for llvm 3.5+
-if convert(VersionNumber, Base.libllvm_version) > v"3.5-"
+if Base.libllvm_version == "svn" || convert(VersionNumber, Base.libllvm_version) > v"3.5-"
 
 function doubly_declared_floor(x::Float64)
     llvmcall(
