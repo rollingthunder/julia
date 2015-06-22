@@ -37,7 +37,7 @@ FLAGS += -DLLVM_SHLIB
 endif
 
 ifeq ($(LLVM_TARGET_HSAIL),1)
-LLVMLINK += -lhsail -lLLVMHSAILUtil
+LLVMLINK += -lhsail
 endif
 
 COMMON_LIBS = -L$(build_shlibdir) -L$(build_libdir) $(LIBUV) $(LIBUTF8PROC) $(NO_WHOLE_ARCHIVE) $(LLVMLINK) $(OSLIBS)
@@ -101,7 +101,7 @@ $(julia_flisp_boot): julia-parser.scm julia-syntax.scm \
 	@$(call PRINT_FLISP, $(call spawn,$(FLISP_EXECUTABLE)) ./mk_julia_flisp_boot.scm)
 
 $(BUILDDIR)/ast.o $(BUILDDIR)/ast.dbg.obj: $(BUILDDIR)/julia_flisp.boot.inc flisp/*.h
-$(BUILDDIR)/codegen.o $(BUILDDIR)/codegen.dbg.obj: intrinsics.cpp cgutils.cpp ccall.cpp abi_*.cpp
+$(BUILDDIR)/codegen.o $(BUILDDIR)/codegen.dbg.obj: intrinsics.cpp cgutils.cpp ccall.cpp abi_*.cpp codegen_*.cpp
 $(BUILDDIR)/builtins.o $(BUILDDIR)/builtins.dbg.obj: table.c
 $(BUILDDIR)/gc.o $(BUILDDIR)/gc.dbg.obj: gc-debug.c
 $(BUILDDIR)/signal-handling.o $(BUILDDIR)/signal-handling.dbg.obj: signals-*.c

@@ -383,19 +383,6 @@ extern "C" DLLEXPORT void jl_gc_wb_slow(jl_value_t* parent, jl_value_t* ptr)
 }
 
 // --- code generation ---
-
-class CodeGenContext
-{
-public:
-	// commmon components for a device target codegen
-	std::unique_ptr<PassManager> PM;
-	std::unique_ptr<FunctionPassManager> FPM;
-	TargetMachine* TM;
-
-	virtual Module* getModuleFor(jl_lambda_info_t* li) = 0;
-	virtual ~CodeGenContext() {}
-};
-
 // per-local-variable information
 struct jl_varinfo_t {
     Value *memvalue;  // an address, if the var is alloca'd
@@ -504,6 +491,20 @@ typedef struct {
     codegen_target target;
 	CodeGenContext* codegen;
 } jl_codectx_t;
+
+class CodeGenContext
+{
+public:
+	// commmon components for a device target codegen
+	std::unique_ptr<PassManager> PM;
+	std::unique_ptr<FunctionPassManager> FPM;
+	TargetMachine* TM;
+
+	virtual Module* getModuleFor(jl_lambda_info_t* li) = 0;
+	virtual Function* generateWrapper(jl_lambda_info_t* li, jl_expr_t* ast, Function* f);
+	virtual void addMetadata(Function* f, jl_codectx_t& ctx) {}
+	virtual ~CodeGenContext() {}
+};
 
 typedef struct {
     size_t len;
@@ -653,6 +654,9 @@ static void maybe_alloc_arrayvar(jl_sym_t *s, jl_codectx_t *ctx)
 }
 
 // --- entry point ---
+
+#include "codegen_spir.cpp"
+
 //static int n_emit=0;
 static Function *emit_function(jl_lambda_info_t *lam);
 //static int n_compile=0;
@@ -718,181 +722,6 @@ static Function *to_function(jl_lambda_info_t *li)
     JL_SIGATOMIC_END();
     return f;
 }
-
-class SPIRCodeGenContext : public CodeGenContext
-{
-public:
-	std::map<jl_lambda_info_t*, Module*> Modules;
-
-	Module* getModuleFor(jl_lambda_info_t* li) override {
-		auto M = new Module(li->name->name, getGlobalContext());
-
-		Modules[li] = M;
-
-		return M;
-	}
-
-	~SPIRCodeGenContext() override {
-		for(const auto& KV : Modules) {
-			delete KV.second;
-		}
-	}
-};
-
-#define spir_ctx() ((SPIRCodeGenContext*) targetCodeGenContexts[SPIR])
-
-extern "C" void init_spir_codegen(void)
-{
-    if (spir_ctx() != nullptr)
-	{
-        jl_error("cannot re-initialize SPIR codegen, destroy the existing one first");
-	}
-	auto ctx = std::unique_ptr<SPIRCodeGenContext>( new SPIRCodeGenContext());
-
-	std::string TheTriple("spir64-unknown-unknown");
-
-	std::string Error;
-	auto TheTarget = TargetRegistry::lookupTarget(TheTriple,
-			Error);
-	if (!TheTarget) {
-		jl_error("couldn't retrieve SPIR target");
-	}
-    auto TM = TheTarget->createTargetMachine(
-        TheTriple, /*CPU*/ "", "", TargetOptions(),
-        Reloc::PIC_, CodeModel::Default, CodeGenOpt::Aggressive);
-
-    if (!TM)
-        jl_error("Could not create SPIR target machine");
-    TM->setAsmVerbosityDefault(true);
-
-    auto PM = std::unique_ptr<PassManager>( new PassManager());
-
-    // Add the target data from the target machine
-    PM->add(new DataLayoutPass());
-
-    // Eliminate all unused functions
-    PM->add(createGlobalOptimizerPass());
-    PM->add(createStripDeadPrototypesPass());
-
-	// Inline all functions with always_inline attribute
-    PM->add(createAlwaysInlinerPass());
-
-    auto FPM = std::unique_ptr<FunctionPassManager>( new FunctionPassManager(nullptr /*M*/));
-
-    // Enqueue standard optimizations
-    PassManagerBuilder PMB;
-    PMB.OptLevel = CodeGenOpt::Aggressive;
-    PMB.populateFunctionPassManager(*FPM);
-
-	ctx->TM = std::move(TM);
-	ctx->FPM = std::move(FPM);
-	ctx->PM = std::move(PM);
-
-	targetCodeGenContexts[SPIR] = ctx.release();
-}
-
-static Module* load_hsail_intrinsics()
-{
-    const auto SearchPath = std::vector<const char*>{
-		"/opt/amd/bin",
-		getenv("HSA_BUILTINS_PATH"),
-		getenv("HSA_RUNTIME_PATH")
-	};
-	const auto FileName = "builtins-hsail.sign.bc";
-
-	std::error_code ec;
-    std::unique_ptr<MemoryBuffer> MB;
-
-    bool isDir = false;
-    for (const auto D : SearchPath) {
-        if (D == NULL)
-            continue;
-
-        ec = sys::fs::is_directory(D, isDir);
-        if (!ec && isDir) {
-			const auto FilePath = std::string(D) + FileName;
-			auto MBoE = MemoryBuffer::getFile(FilePath);
-			if((ec = MBoE.getError()))
-			{
-				MB = std::move(*MBoE);
-				break;
-			}
-        }
-    }
-
-    if (ec)
-	{
-        jl_errorf("Cannot open HSAIL builtins bitcode file: %s",
-                  ec.message().c_str());
-	}
-    auto M2OrError = parseBitcodeFile(MB->getMemBufferRef(),
-                                                  getGlobalContext());
-
-    if (std::error_code ec = M2OrError.getError())
-	{
-        jl_errorf("could not parse device library: %s", ec.message().c_str());
-	}
-
-	return *M2OrError;
-}
-
-static Function *to_spir(jl_lambda_info_t *li)
-{
-	auto CTX = spir_ctx();
-
-	auto F = (Function*)li->functionObject;
-
-	auto M = F->getParent();
-
-	auto PM = std::unique_ptr<PassManager>( new PassManager());
-#if defined(LLVM36)
-	PM->add(new DataLayoutPass());
-#else
-	jl_errorf("SPIR Target not supported on your version of LLVM");
-#endif
-	PM->add(createInternalizePass({ F->getName().data() }));
-	PM->run(*M);
-
-    // Run common passes
-    for (auto F = M->begin(), E = M->end(); F != E; ++F) {
-        CTX->FPM->run(*F);
-	}
-    CTX->PM->run(*M);
-
-	return F;
-}
-
-#if HAS_HSA
-
-#define hsail_ctx() ((HSAILCodeGenContext*) targetCodeGenContexts[HSAIL])
-
-static void* to_brig(jl_lambda_info_t* li)
-{
-    M2->setTargetTriple(M->getTargetTriple());
-#ifdef LLVM36
-    // TODO: use the DiagnosticHandler
-    if (Linker::LinkModules(M, M2))
-        jl_error("Could not link device library");
-#else
-	jl_error("unsupported LLVM");
-#endif
-    delete M2;
-
-
-    // Write the assembly
-    std::string code;
-    llvm::raw_string_ostream stream(code);
-    llvm::formatted_raw_ostream fstream(stream);
-    CTX->TM->addPassesToEmitFile(
-        *PM, fstream, TargetMachine::CGFT_AssemblyFile, true, 0, 0);
-    PM->run(*M);
-    fstream.flush();
-    stream.flush();
-
-	// TODO: return BRIG
-	return nullptr;
-}
-#endif
 
 static void jl_setup_module(Module *m, bool add)
 {
@@ -2479,6 +2308,11 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                         assert(((jl_datatype_t*)ety)->instance != NULL);
                         return literal_pointer_val(((jl_datatype_t*)ety)->instance);
                     }
+                    if (ctx->target != HOST) {
+						// TODO: Move into CodeGenContext
+                        Value *vptr = builder.CreateGEP(ary, idx);
+                        return builder.CreateLoad(vptr, false);
+                    }
                     return typed_load(emit_arrayptr(ary, args[1], ctx), idx, ety, ctx, tbaa_user);
                 }
             }
@@ -2533,8 +2367,14 @@ static Value *emit_known_call(jl_value_t *ff, jl_value_t **args, size_t nargs,
                             data_owner->addIncoming(ary, curBB);
                             data_owner->addIncoming(own_ptr, ownedBB);
                         }
-                        typed_store(emit_arrayptr(ary,args[1],ctx), idx, v,
+                        if (ctx->target != HOST) {
+							// TODO: Move into CodegenContext
+                            typed_store(ary, idx, v, ety, ctx, tbaa_user, data_owner);
+                        }
+                        else {
+                            typed_store(emit_arrayptr(ary,args[1],ctx), idx, v,
                                     ety, ctx, tbaa_user, data_owner);
+                        }
                     }
                     JL_GC_POP();
                     return ary;
@@ -4145,6 +3985,9 @@ static Function *gen_jlcall_wrapper(jl_lambda_info_t *lam, jl_expr_t *ast, Funct
 
     return w;
 }
+Function* CodeGenContext::generateWrapper(jl_lambda_info_t* li, jl_expr_t* ast, Function* f) {
+	return gen_jlcall_wrapper(li, ast, f);
+}
 
 codegen_target target_from_symbol(jl_sym_t* sym)
 {
@@ -4152,21 +3995,26 @@ codegen_target target_from_symbol(jl_sym_t* sym)
 	{
         return HOST;
 	}
-    else if (sym == jl_symbol("ptx"))
+	else
 	{
-        return PTX;
-	}
-    else if (sym == jl_symbol("spir"))
-	{
-        return SPIR;
-	}
-    else if (sym == jl_symbol("hsail"))
-	{
-        return HSAIL;
-	}
-    else
-	{
-        jl_error((std::string("unknown codegen target ") + sym->name).c_str());
+		jl_printf(JL_STDERR, "Device Target: %s\n", sym->name);
+
+		if (sym == jl_symbol("ptx"))
+		{
+			return PTX;
+		}
+		else if (sym == jl_symbol("spir"))
+		{
+			return SPIR;
+		}
+		else if (sym == jl_symbol("hsail"))
+		{
+			return HSAIL;
+		}
+		else
+		{
+			jl_error((std::string("unknown codegen target ") + sym->name).c_str());
+		}
 	}
 }
 
@@ -4201,9 +4049,17 @@ static Function *emit_function(jl_lambda_info_t *lam)
     ctx.boundsCheck.push_back(true);
 	ctx.target = target_from_symbol(ctx.linfo->target);
 	ctx.codegen = targetCodeGenContexts[ctx.target];
-	if (ctx.target != HOST && ctx.codegen == nullptr) {
-		jl_error("requested codegen is not initialized");
-		ctx.target = HOST;
+	if (ctx.target != HOST) {
+		if(ctx.codegen == nullptr) {
+			// TODO Fall back gracefully
+			jl_error("requested codegen is not initialized\n");
+			ctx.target = HOST;
+		} else {
+			jl_printf(JL_STDERR, "Compiling function  %s for target %s \n",
+					lam->name->name,
+					lam->target->name
+				);
+		}
 	}
 
     // step 2. process var-info lists to see what vars are captured, need boxing
@@ -4355,7 +4211,11 @@ static Function *emit_function(jl_lambda_info_t *lam)
             lam->specFunctionID = jl_assign_functionID(f);
         }
         if (lam->functionObject == NULL) {
-            Function *fwrap = gen_jlcall_wrapper(lam, ast, f, ctx.sret);
+            Function *fwrap;
+            if (ctx.target != HOST)
+                fwrap = ctx.codegen->generateWrapper(lam, ast, f);
+            else
+                fwrap = gen_jlcall_wrapper(lam, ast, f, ctx.sret);
             lam->functionObject = (void*)fwrap;
             lam->functionID = jl_assign_functionID(fwrap);
         }
@@ -4392,6 +4252,10 @@ static Function *emit_function(jl_lambda_info_t *lam)
         f->addFnAttr(Attribute::StackProtectReq);
 #endif
     ctx.f = f;
+
+    if (ctx.target != HOST) {
+		ctx.codegen->addMetadata(f, ctx);
+    }
 
     // step 5. set up debug info context and create first basic block
     bool in_user_code = !jl_is_submodule(lam->module, jl_base_module) && !jl_is_submodule(lam->module, jl_core_module);
@@ -4672,6 +4536,15 @@ static Function *emit_function(jl_lambda_info_t *lam)
         if (store_unboxed_p(s, &ctx)) {
             alloc_local(s, &ctx);
         }
+        else if (ctx.target != HOST) {
+			// TODO: Move to CodeGenContext
+            jl_errorf("device target does not support boxing of function argument %s (inferred: %s, capt: %s, usedundef: %s)",
+                      s->name,
+				     (ctx.linfo->inferred) ? "true" : "false",
+					 (ctx.vars[s].isCaptured) ? "true" : "false",
+					 (ctx.vars[s].usedUndef) ? "true" : "false"
+					 );
+        }
         else if (ctx.vars[s].isAssigned || (va && i==largslen-1)) {
             n_roots++;
         }
@@ -4685,6 +4558,16 @@ static Function *emit_function(jl_lambda_info_t *lam)
             continue;
         if (store_unboxed_p(s, &ctx)) {
             alloc_local(s, &ctx);
+        }
+        else if (ctx.target != HOST) {
+			// TODO: Move to CodeGenContext
+            jl_errorf("device target does not support boxing of local variable %s (inferred: %s, capt: %s, usedundef: %s, typeisbits: %s)",
+                      s->name,
+				     (ctx.linfo->inferred) ? "true" : "false",
+					 (ctx.vars[s].isCaptured) ? "true" : "false",
+					 (ctx.vars[s].usedUndef) ? "true" : "false",
+					 ((jl_datatype_t*)vi.declType)->name->name->name //(isbits_spec(vi.declType,true)) ? "true" : "false"
+					);
         }
         else {
             if (!vi.used) {
