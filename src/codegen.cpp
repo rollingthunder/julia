@@ -4106,8 +4106,6 @@ codegen_target target_from_symbol(jl_sym_t* sym)
 	}
 	else
 	{
-		jl_printf(JL_STDERR, "Device Target: %s\n", sym->name);
-
 		if (sym == jl_symbol("ptx"))
 		{
 			return PTX;

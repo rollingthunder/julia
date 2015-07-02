@@ -1,3 +1,9 @@
+#if 1
+#define SPIR_DEBUG(code) code;
+#else
+#define SPIR_DEBUG(code)
+#endif
+
 namespace LangAS
 {
 // See clang/lib/Basic/Targets.cpp
@@ -41,12 +47,13 @@ static TargetMachine* GetTargetMachine(Triple TheTriple) {
 class SPIRCodeGenContext : public CodeGenContext
 {
 private:
+	std::string TheTriple;
 	std::map<Type*, std::string> MetadataTypeMap;
 
 	void genOpenCLArgMetadata(llvm::Function *Fn,
 		SmallVector<llvm::Metadata *, 5> &kernelMDArgs);
 	void emitOpenCLKernelMetadata(llvm::Function *Fn);
-	bool isKernel(Function& F) { return F.getReturnType() == T_void; }
+	bool isKernel(Function* F) { return F->getReturnType()->isVoidTy(); }
 	void addModuleMetadata(Module* M);
 public:
 	std::map<jl_lambda_info_t*, Module*> Modules;
@@ -56,10 +63,11 @@ public:
 	void runOnModule(Module* M) override;
 	void updateFunctionSignature(std::vector<Type*>& argTypes, Type*& retType);
 	virtual std::unique_ptr<PassManager> getModulePasses(Module* M) override;
-	virtual std::unique_ptr<FunctionPassManager> getFunctionPasses(Module* M) override;
 
 	Module* getModuleFor(jl_lambda_info_t* li) override {
 		auto M = new Module(li->name->name, getGlobalContext());
+
+		M->setTargetTriple(TheTriple);
 
 		Modules[li] = M;
 
@@ -77,9 +85,8 @@ public:
 };
 
 SPIRCodeGenContext::SPIRCodeGenContext()
+	: TheTriple("spir64-unknown-unknown")
 {
-	std::string TheTriple("spir64-unknown-unknown");
-
 	// Add a few supported types for metadata generation
 	MetadataTypeMap = {
 		{ T_char, "char"},
@@ -96,8 +103,14 @@ SPIRCodeGenContext::SPIRCodeGenContext()
 }
 
 void SPIRCodeGenContext::addMetadata(Function* F, jl_codectx_t& ctx) {
-	// Add "spir_kernel" attribute
-	F->addFnAttr("spir_kernel");
+	SPIR_DEBUG(errs() << "SPIR: Adding Metadata for "
+			<< F->getName() << "\n")
+
+	// set call convention
+	if (isKernel(F))
+		F->setCallingConv(CallingConv::SPIR_KERNEL);
+	else
+		F->setCallingConv(CallingConv::SPIR_FUNC);
 
 
 	emitOpenCLKernelMetadata(F);
@@ -105,25 +118,28 @@ void SPIRCodeGenContext::addMetadata(Function* F, jl_codectx_t& ctx) {
 
 void SPIRCodeGenContext::updateFunctionSignature(std::vector<Type*>& argTypes, Type*& retType)
 {
+	SPIR_DEBUG(errs() << "SPIR: Updating function signature\n")
+
 	if (!retType->isVoidTy())
 		jl_error("Only kernel functions returning void are supported");
 
 	// for now, only global ptr args
 	// update types to add the addr space
-	for(auto& T : argTypes)
+	for(size_t I = 0U, E = argTypes.size(); I < E; ++I)
 	{
+		auto T = argTypes[I];
 		if (T->isPointerTy())
 		{
 			auto TAddr = PointerType::get(T->getPointerElementType(),
 					LangAS::opencl_global);
-			T = TAddr;
+			argTypes[I] = TAddr;
 		}
 	}
 }
 
 void SPIRCodeGenContext::runOnModule(Module* M)
 {
-
+	CodeGenContext::runOnModule(M);
 }
 
 std::string printTypeToString(Type* Ty)
@@ -359,10 +375,25 @@ std::unique_ptr<PassManager> SPIRCodeGenContext::getModulePasses(Module* M)
 	SmallVector<std::string, 8> NameStrings;
 	SmallVector<const char*, 8> ExportedNames;
 
-	auto I = 0U;
-	for(auto& F : *M)
+    auto OpenCLKernelMD = getOrInsertOpenCLKernelNode(M);
+	auto N = OpenCLKernelMD->getNumOperands();
+	for(auto I = 0U; I < N; ++I)
 	{
-		NameStrings.push_back(F.getName());
+		auto F = getKernelFromMDNode(OpenCLKernelMD, I);
+
+		if (!F)
+		{
+			SPIR_DEBUG(errs() << "SPIR: Could not retrieve Kernel from Metadata\n")
+    		continue;
+		}
+
+		SPIR_DEBUG(errs() << "SPIR: Kernel in Metadata - "
+				<< F->getName() << "\n")
+
+
+
+
+		NameStrings.push_back(F->getName());
 		ExportedNames.push_back(NameStrings[I].c_str());
 		I++;
 	}
@@ -383,6 +414,8 @@ void jl_init_spir_codegen(void)
 	}
 
 	targetCodeGenContexts[SPIR] = new SPIRCodeGenContext();
+
+	jl_printf(JL_STDERR, "SPIR codegen initialized\n");
 }
 
 
@@ -482,7 +515,7 @@ static std::unique_ptr<Module> load_hsail_intrinsics()
 			jl_errorf("could not parse device library: %s", ec.message().c_str());
 		}
 
-		MIntrin = *M2OrError;
+		MIntrin = std::move(*M2OrError);
 	}
 
 	return std::unique_ptr<Module>(llvm::CloneModule(MIntrin.get()));
@@ -533,6 +566,8 @@ void jl_init_hsail_codegen(void)
 		jl_error("Could not create HSAIL target machine");
 
 	targetCodeGenContexts[HSAIL] = CTX.release();
+
+	jl_printf(JL_STDERR, "HSAIL codegen initialized\n");
 }
 
 extern "C" DLLEXPORT
