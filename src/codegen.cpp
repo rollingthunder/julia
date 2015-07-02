@@ -492,20 +492,98 @@ typedef struct {
 	CodeGenContext* codegen;
 } jl_codectx_t;
 
+namespace std {
+	template< class T, class... Args >
+	unique_ptr<T> make_unique( Args&&... args )
+	{
+		return unique_ptr<T>(new T(std::forward<Args>(args)...));
+	}
+}
+
 class CodeGenContext
 {
 public:
 	// commmon components for a device target codegen
-	std::unique_ptr<PassManager> PM;
-	std::unique_ptr<FunctionPassManager> FPM;
 	TargetMachine* TM;
 
+	virtual void updateFunctionSignature(std::vector<Type*>& argTypes, Type*& retType) {}
+	virtual std::unique_ptr<PassManager> getModulePasses(Module* M);
+	virtual std::unique_ptr<FunctionPassManager> getFunctionPasses(Module* M);
+	virtual void runOnModule(Module* M);
 	virtual Module* getModuleFor(jl_lambda_info_t* li) = 0;
 	virtual Function* generateWrapper(jl_lambda_info_t* li, jl_expr_t* ast, Function* f);
 	virtual void addMetadata(Function* f, jl_codectx_t& ctx) {}
 	virtual ~CodeGenContext() {}
 };
 
+void CodeGenContext::runOnModule(Module* M)
+{
+	// run module passes, if any
+	auto PM = getModulePasses(M);
+	if(PM)
+	{
+		PM->run(*M);
+	}
+
+	// run function passes
+	auto FPM = getFunctionPasses(M);
+	if(FPM)
+	{
+		FPM->doInitialization();
+		for(auto& F : *M)
+		{
+			FPM->run(F);
+		}
+		FPM->doFinalization();
+	}
+}
+
+std::unique_ptr<PassManager> CodeGenContext::getModulePasses(Module* M)
+{
+	auto PM = std::make_unique<PassManager>();
+
+    // Eliminate all unused functions
+    PM->add(createGlobalOptimizerPass());
+    PM->add(createStripDeadPrototypesPass());
+
+	// Inline all functions with always_inline attribute
+    PM->add(createAlwaysInlinerPass());
+
+	return PM;
+}
+
+std::unique_ptr<FunctionPassManager> CodeGenContext::getFunctionPasses(Module* M)
+{
+    auto FPM = std::make_unique<FunctionPassManager>(M);
+
+    // Enqueue standard optimizations
+    PassManagerBuilder PMB;
+    PMB.OptLevel = CodeGenOpt::Aggressive;
+    PMB.populateFunctionPassManager(*FPM);
+
+	return FPM;
+}
+class WrappingCodeGenContext : public CodeGenContext {
+private:
+	CodeGenContext* Inner;
+public:
+	WrappingCodeGenContext(CodeGenContext * inner) : Inner(inner) {}
+	virtual void updateFunctionSignature(std::vector<Type*>& argTypes, Type*& retType) override {
+		Inner->updateFunctionSignature(argTypes, retType);
+	}
+	virtual void runOnModule(Module* M) override {}
+	virtual Module* getModuleFor(jl_lambda_info_t* li) override {
+		return Inner->getModuleFor(li);
+	}
+	virtual Function* generateWrapper(jl_lambda_info_t* li, jl_expr_t* ast, Function* f) override
+	{
+		return Inner->generateWrapper(li, ast, f);
+	}
+	virtual void addMetadata(Function* f, jl_codectx_t& ctx) {
+		Inner->addMetadata(f, ctx);
+	}
+	virtual ~WrappingCodeGenContext() {}
+};
 typedef struct {
     size_t len;
     struct {
@@ -656,6 +734,37 @@ static void maybe_alloc_arrayvar(jl_sym_t *s, jl_codectx_t *ctx)
 // --- entry point ---
 
 #include "codegen_spir.cpp"
+
+codegen_target target_from_symbol(jl_sym_t* sym);
+
+extern "C" DLLEXPORT
+bool jl_init_device_codegen(jl_sym_t* sym)
+{
+	auto target = target_from_symbol(sym);
+
+	switch(target)
+	{
+		case HOST:
+			jl_printf(JL_STDERR, "Warning: You do not need to explicitly initialize the HOST codegen");
+			break;
+		case SPIR:
+			jl_init_spir_codegen();
+			break;
+		case HSAIL:
+#if HAS_HSA
+			jl_init_hsail_codegen();
+#else
+			jl_error("HSAIL is unsupported");
+			return false;
+#endif
+			break;
+		default:
+			jl_printf(JL_STDERR, "Warning: Cannot initialize unknown codegen '%s'", sym->name);
+			return false;
+			break;
+	}
+	return true;
+}
 
 //static int n_emit=0;
 static Function *emit_function(jl_lambda_info_t *lam);
@@ -4200,6 +4309,12 @@ static Function *emit_function(jl_lambda_info_t *lam)
                 ty = PointerType::get(ty,0);
             fsig.push_back(ty);
         }
+
+		if(ctx.target != HOST)
+		{
+			ctx.codegen->updateFunctionSignature(fsig, rt);
+		}
+
         f = Function::Create(FunctionType::get(rt, fsig, false),
                              imaging_mode ? GlobalVariable::InternalLinkage : GlobalVariable::ExternalLinkage,
                              funcName.str(), m);
