@@ -37,7 +37,7 @@ FLAGS += -DLLVM_SHLIB
 endif
 
 ifeq ($(LLVM_TARGET_HSAIL),1)
-LLVMLINK += -lhsail
+LLVMLINK += -lhsail -lLLVMHSAILUtil
 endif
 
 COMMON_LIBS = -L$(build_shlibdir) -L$(build_libdir) $(LIBUV) $(LIBUTF8PROC) $(NO_WHOLE_ARCHIVE) $(LLVMLINK) $(OSLIBS)
