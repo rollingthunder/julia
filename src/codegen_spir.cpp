@@ -482,7 +482,7 @@ static std::unique_ptr<Module> load_hsail_intrinsics()
 			jl_errorf("could not parse device library: %s", ec.message().c_str());
 		}
 
-		MIntrin = std::unique_ptr<Module>(*M2OrError);
+		MIntrin = *M2OrError;
 	}
 
 	return std::unique_ptr<Module>(llvm::CloneModule(MIntrin.get()));
