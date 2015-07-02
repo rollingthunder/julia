@@ -149,6 +149,11 @@ BUILD_LLVM_CLANG = 0
 # see http://lldb.llvm.org/build.html for dependencies
 BUILD_LLDB = 0
 
+ifeq ($(LLVM_TARGET_HSAIL),1)
+CXXFLAGS += -DHAS_HSA
+endif
+
+
 # Cross-compile
 #XC_HOST = i686-w64-mingw32
 #XC_HOST = x86_64-w64-mingw32

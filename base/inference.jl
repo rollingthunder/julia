@@ -1412,6 +1412,12 @@ function typeinf_uncached(linfo::LambdaStaticData, atypes::ANY, sparams::SimpleV
         ast = linfo.ast
     end
 
+	# enable debug output for marked functions
+	dbg = false
+	if linfo.name == :kernel_f
+		dbg = true
+	end
+
     args = f_argnames(ast)
     la = length(args)
     assert(is(ast.head,:lambda))
