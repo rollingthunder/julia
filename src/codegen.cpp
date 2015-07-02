@@ -3733,29 +3733,6 @@ static void clear_gc_frame(jl_gcinfo_t *gc)
 }
 
 static void
-}
-
-static void clear_gc_frame(jl_gcinfo_t *gc)
-{
-    // replace instruction uses with Undef first to avoid LLVM assertion failures
-    BasicBlock::iterator bbi = gc->first_gcframe_inst;
-    while (1) {
-        Instruction &iii = *bbi;
-        Type *ty = iii.getType();
-        if (ty != T_void)
-            iii.replaceAllUsesWith(UndefValue::get(ty));
-        if (bbi == gc->last_gcframe_inst) break;
-        bbi++;
-    }
-    // Remove GC frame creation
-    // (instructions from gc->gcframe to gc->last_gcframe_inst)
-    BasicBlock::InstListType &il = gc->gcframe->getParent()->getInstList();
-    il.erase(gc->first_gcframe_inst, gc->last_gcframe_inst);
-    // erase() erases up *to* the end point; erase last inst too
-    il.erase(gc->last_gcframe_inst);
-}
-
-static void
 emit_gcpops(jl_codectx_t *ctx)
 {
     Function *F = ctx->f;
@@ -4100,8 +4077,6 @@ codegen_target target_from_symbol(jl_sym_t* sym)
 	}
 	else
 	{
-		jl_printf(JL_STDERR, "Device Target: %s\n", sym->name);
-
 		if (sym == jl_symbol("ptx"))
 		{
 			return PTX;

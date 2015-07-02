@@ -970,6 +970,15 @@ static void error_unless(Value *cond, const std::string &msg, jl_codectx_t *ctx)
     builder.SetInsertPoint(passBB);
 }
 
+static void emit_trap(jl_codectx_t* ctx)
+{
+	llvm::Value *Trap =
+		Intrinsic::getDeclaration(ctx->f->getParent(), Intrinsic::trap);
+	CallInst *TrapCall = builder.CreateCall(Trap, ArrayRef<Value*>());
+	TrapCall->setDoesNotReturn();
+	TrapCall->setDoesNotThrow();
+}
+
 static void raise_exception_unless(Value *cond, Value *exc, jl_codectx_t *ctx)
 {
     BasicBlock *failBB = BasicBlock::Create(getGlobalContext(),"fail",ctx->f);
@@ -978,11 +987,8 @@ static void raise_exception_unless(Value *cond, Value *exc, jl_codectx_t *ctx)
     builder.SetInsertPoint(failBB);
     if (ctx->target != HOST) {
         // TODO: pass exception details (type, lineno, ...)
-        llvm::Value *Trap =
-            Intrinsic::getDeclaration(ctx->f->getParent(), Intrinsic::trap);
-        CallInst *TrapCall = builder.CreateCall(Trap);
-        TrapCall->setDoesNotReturn();
-        TrapCall->setDoesNotThrow();
+		errs() << "Device CodeGen: Emitting Trap instead of exception\n";
+		emit_trap(ctx);
     } else {
 #ifdef LLVM37
     builder.CreateCall(prepare_call(jlthrow_line_func), { exc,
@@ -1620,11 +1626,8 @@ static Value *emit_array_nd_index(Value *a, jl_value_t *ex, size_t nd, jl_value_
             builder.SetInsertPoint(failBB);
 
             // TODO: pass exception details (type, lineno, ...)
-            llvm::Value *Trap =
-                Intrinsic::getDeclaration(ctx->f->getParent(), Intrinsic::trap);
-            CallInst *TrapCall = builder.CreateCall(Trap);
-            TrapCall->setDoesNotReturn();
-            TrapCall->setDoesNotThrow();
+			errs() << "Device CodeGen: Emitting Trap instead of bounds check\n";
+			emit_trap(ctx);
         } else {
 			Value *alen = emit_arraylen(a, ex, ctx);
 			// if !(i < alen) goto error
