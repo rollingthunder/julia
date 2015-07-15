@@ -3,6 +3,32 @@
 #else
 #define SPIR_DEBUG(code)
 #endif
+#if 1
+#define HSAIL_DEBUG(code) code;
+#else
+#define HSAIL_DEBUG(code)
+#endif
+
+jl_function_t* get_function_spec(jl_function_t* f, jl_tupletype_t* tt)
+{
+    jl_function_t *sf = f;
+    if (tt != NULL) {
+        if (!jl_is_function(f) || !jl_is_gf(f)) {
+            return NULL;
+        }
+        sf = jl_get_specialization(f, tt);
+    }
+    if (sf == NULL || sf->linfo == NULL) {
+        sf = jl_method_lookup_by_type(jl_gf_mtable(f), tt, 0, 0);
+        if (sf == jl_bottom_func) {
+            return NULL;
+        }
+        jl_printf(JL_STDERR,
+                  "Warning: Returned code may not match what actually runs.\n");
+    }
+
+	return sf;
+}
 
 namespace LangAS
 {
@@ -132,7 +158,8 @@ void SPIRCodeGenContext::updateFunctionSignature(std::vector<Type*>& argTypes, T
 		{
 			auto TAddr = PointerType::get(T->getPointerElementType(),
 					LangAS::opencl_global);
-			argTypes[I] = TAddr;
+			// TODO: Fix julia issues when using argument types with AddressSpace
+			//argTypes[I] = TAddr;
 		}
 	}
 }
@@ -206,7 +233,7 @@ void SPIRCodeGenContext::genOpenCLArgMetadata(llvm::Function *Fn,
 		  .push_back(
 				  llvm::ConstantAsMetadata::get(
 					  ConstantInt::get(T_int32,
-						  cast<PointerType>(pointeeTy)->getAddressSpace()
+						  cast<PointerType>(ty)->getAddressSpace()
 						  )
 					  )
 				  );
@@ -303,10 +330,10 @@ Function* getKernelFromMDNode(NamedMDNode* KernelMD, size_t i)
 	auto NKernels = KernelMD->getNumOperands();
 
 	if(i < NKernels) {
-		auto KernelNode = cast_or_null<ValueAsMetadata>(KernelMD->getOperand(i));
+		auto KernelNode = dyn_cast<ValueAsMetadata>(KernelMD->getOperand(i));
 		if(KernelNode)
 		{
-            auto Kernel = cast_or_null<Function>(KernelNode->getValue());
+            auto Kernel = dyn_cast<Function>(KernelNode->getValue());
 			if(Kernel)
 			{
 				return Kernel;
@@ -398,7 +425,7 @@ std::unique_ptr<PassManager> SPIRCodeGenContext::getModulePasses(Module* M)
 		I++;
 	}
 
-	PM->add(createInternalizePass(ArrayRef<const char*>(ExportedNames)));
+	//PM->add(createInternalizePass(ArrayRef<const char*>(ExportedNames)));
 
 	return PM;
 }
@@ -418,6 +445,7 @@ void jl_init_spir_codegen(void)
 	jl_printf(JL_STDERR, "SPIR codegen initialized\n");
 }
 
+static Function *to_function(jl_lambda_info_t *li);
 
 static Function *to_spir(jl_lambda_info_t *li)
 {
@@ -432,9 +460,18 @@ static Function *to_spir(jl_lambda_info_t *li)
 
 	auto F = (Function*)li->specFunctionObject;
 
+	if (!F)
+	{
+		F = to_function(li);
+	}
+
 	auto M = F->getParent();
 
 	CTX->runOnModule(M);
+
+	SPIR_DEBUG(errs() << "SPIR: Generated Module \n");
+	SPIR_DEBUG(M->dump());
+
 
 	li->targetFunctionObjects[SPIR] = F;
 
@@ -444,22 +481,8 @@ static Function *to_spir(jl_lambda_info_t *li)
 extern "C" DLLEXPORT
 void *jl_get_spirf(jl_function_t *f, jl_tupletype_t *tt)
 {
-    jl_function_t *sf = f;
-    if (tt != NULL) {
-        if (!jl_is_function(f) || !jl_is_gf(f)) {
-            return NULL;
-        }
-        sf = jl_get_specialization(f, tt);
-    }
-    if (sf == NULL || sf->linfo == NULL) {
-        sf = jl_method_lookup_by_type(jl_gf_mtable(f), tt, 0, 0);
-        if (sf == jl_bottom_func) {
-            return NULL;
-        }
-        jl_printf(JL_STDERR,
-                  "Warning: Returned code may not match what actually runs.\n");
-    }
-    if (sf->linfo->targetFunctionObjects[SPIR] == NULL) {
+    jl_function_t *sf = get_function_spec(f,tt);
+	if (sf->linfo->targetFunctionObjects[SPIR] == NULL) {
         to_spir(sf->linfo);
     }
 
@@ -468,19 +491,22 @@ void *jl_get_spirf(jl_function_t *f, jl_tupletype_t *tt)
 
 #if HAS_HSA
 
+#include "libHSAIL/HSAILScanner.h"
+
 static std::unique_ptr<Module> load_hsail_intrinsics()
 {
 	static std::unique_ptr<Module> MIntrin;
 
 	if (!MIntrin) {
-		// load intrinsics file the firs time we are called
+		// load intrinsics file the first time we are called
+		HSAIL_DEBUG(errs() << "HSAIL: Loading HSAIL Intrinsics" << "\n");
 
 		const auto SearchPath = std::vector<const char*>{
 			"/opt/amd/bin",
 			getenv("HSA_BUILTINS_PATH"),
 			getenv("HSA_RUNTIME_PATH")
 		};
-		const auto FileName = "builtins-hsail.sign.bc";
+		const auto FileName = "/builtins-hsail.sign.bc";
 
 		std::error_code ec;
 		std::unique_ptr<MemoryBuffer> MB;
@@ -493,16 +519,24 @@ static std::unique_ptr<Module> load_hsail_intrinsics()
 			ec = sys::fs::is_directory(D, isDir);
 			if (!ec && isDir) {
 				const auto FilePath = std::string(D) + FileName;
+				HSAIL_DEBUG(errs() << "HSAIL: Searching path " << FilePath << "\n");
+
 				auto MBoE = MemoryBuffer::getFile(FilePath);
-				if((ec = MBoE.getError()))
+				if(MBoE)
 				{
+					HSAIL_DEBUG(errs() << "HSAIL: Found at " << FilePath << "\n");
 					MB = std::move(*MBoE);
 					break;
+				}
+				else
+				{
+					HSAIL_DEBUG(errs() << "HSAIL: Not Found at " << FilePath << "\n");
+					ec = MBoE.getError();
 				}
 			}
 		}
 
-		if (ec)
+		if (!MB)
 		{
 			jl_errorf("Cannot open HSAIL builtins bitcode file: %s",
 					  ec.message().c_str());
@@ -565,6 +599,8 @@ void jl_init_hsail_codegen(void)
 	if (!TM)
 		jl_error("Could not create HSAIL target machine");
 
+	CTX->TM = TM;
+
 	targetCodeGenContexts[HSAIL] = CTX.release();
 
 	jl_printf(JL_STDERR, "HSAIL codegen initialized\n");
@@ -573,12 +609,26 @@ void jl_init_hsail_codegen(void)
 extern "C" DLLEXPORT
 Function* to_hsail(jl_lambda_info_t* li)
 {
-    auto FSpir = to_spir(li);
+	auto CTX = hsail_ctx();
+	if (!CTX) {
+		jl_error("HSAIL Codegen not initialized");
+	}
+    auto FSpir = (Function*)li->targetFunctionObjects[SPIR];
+
+	if(!FSpir)
+		FSpir = to_spir(li);
+
 	auto MSpir = FSpir->getParent();
-	auto MHsail = std::unique_ptr<llvm::Module>(llvm::CloneModule(MSpir));
-	auto logger = DisposeLogger("before_intrinsics");
+	// FIXME: We lose metadata nodes and more when copying to a new module
+	//        For now, use the SPIR Module which prevents us from having SPIR
+	//        and HSA IR at the same time
+	//auto MHsail = std::unique_ptr<llvm::Module>(llvm::CloneModule(MSpir));
+	auto MHsail = std::unique_ptr<llvm::Module>(MSpir);
+
+
 	auto MIntrin = load_hsail_intrinsics();
 	MHsail->setTargetTriple(MIntrin->getTargetTriple());
+	MHsail->setDataLayout(MIntrin->getDataLayout());
 
 #ifdef LLVM36
     // TODO: use the DiagnosticHandler
@@ -588,10 +638,15 @@ Function* to_hsail(jl_lambda_info_t* li)
 	jl_error("unsupported LLVM");
 #endif
 
-	logger.released = true;
+	// Run module passes again
+	// (mainly to get inlining)
+	auto PM = CTX->getModulePasses(MHsail.get());
+	PM->run(*MHsail);
 
 	auto FHsail = MHsail->getFunction(FSpir->getName());
 	li->targetFunctionObjects[HSAIL] = FHsail;
+
+	MHsail->dump();
 
 	MHsail.release();
 
@@ -601,27 +656,52 @@ Function* to_hsail(jl_lambda_info_t* li)
 extern "C" DLLEXPORT
 void *jl_get_hsailf(jl_function_t *f, jl_tupletype_t *tt)
 {
-    jl_function_t *sf = f;
-    if (tt != NULL) {
-        if (!jl_is_function(f) || !jl_is_gf(f)) {
-            return NULL;
-        }
-        sf = jl_get_specialization(f, tt);
-    }
-    if (sf == NULL || sf->linfo == NULL) {
-        sf = jl_method_lookup_by_type(jl_gf_mtable(f), tt, 0, 0);
-        if (sf == jl_bottom_func) {
-            return NULL;
-        }
-        jl_printf(JL_STDERR,
-                  "Warning: Returned code may not match what actually runs.\n");
-    }
+    jl_function_t *sf = get_function_spec(f,tt);
     if (sf->linfo->targetFunctionObjects[HSAIL] == NULL) {
-        to_spir(sf->linfo);
+        to_hsail(sf->linfo);
     }
 
-	return (Function*)sf->linfo->targetFunctionObjects[SPIR];
+	return (Function*)sf->linfo->targetFunctionObjects[HSAIL];
 }
+
+SmallVector<char, 4096>* to_brig(void *f)
+{
+	auto CTX = hsail_ctx();
+	auto FHsail = (Function*)f;
+	auto MHsail = FHsail->getParent();
+
+	auto PM = std::make_unique<PassManager>();
+
+    // Write the assembly
+	auto ObjBufferSV = std::make_unique<SmallVector<char, 4096>>();
+	raw_svector_ostream OS(*ObjBufferSV);
+
+	llvm::verifyModule(*MHsail, &errs());
+
+    CTX->TM->addPassesToEmitFile(
+        *PM, OS, TargetMachine::CGFT_ObjectFile, false, nullptr, nullptr);
+	try {
+		PM->run(*MHsail);
+	} catch (const SyntaxError& err) {
+		HSAIL_DEBUG(errs() << "HSAIL: " << err.what() << "\n");
+	}
+    OS.flush();
+
+    return ObjBufferSV.release();
+}
+
+extern "C" DLLEXPORT
+void* jl_get_brigf(jl_function_t* f, jl_tupletype_t* tt)
+{
+    jl_function_t *sf = get_function_spec(f,tt);
+	if (sf->linfo->targetFunctionObjects[BRIG] == NULL) {
+		auto FHsail = jl_get_hsailf(f, tt);
+		sf->linfo->targetFunctionObjects[BRIG] = to_brig(FHsail);
+	}
+
+	return ((SmallVector<char, 4096>*)sf->linfo->targetFunctionObjects[BRIG])->data();
+}
+
 
 extern "C" DLLEXPORT
 jl_value_t* jl_dump_function_hsail(void* f)
@@ -636,9 +716,15 @@ jl_value_t* jl_dump_function_hsail(void* f)
 	SmallVector<char, 4096> ObjBufferSV;
 	raw_svector_ostream OS(ObjBufferSV);
 
+	llvm::verifyModule(*MHsail, &errs());
+
     CTX->TM->addPassesToEmitFile(
-        *PM, OS, TargetMachine::CGFT_AssemblyFile, true, 0, 0);
-    PM->run(*MHsail);
+        *PM, OS, TargetMachine::CGFT_AssemblyFile, false, nullptr, nullptr);
+	try {
+		PM->run(*MHsail);
+	} catch (const SyntaxError& err) {
+		HSAIL_DEBUG(errs() << "HSAIL: " << err.what() << "\n");
+	}
     OS.flush();
 
     return jl_cstr_to_string(ObjBufferSV.data());

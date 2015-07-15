@@ -4066,7 +4066,45 @@ static Function *gen_jlcall_wrapper(jl_lambda_info_t *lam, jl_expr_t *ast, Funct
     return w;
 }
 Function* CodeGenContext::generateWrapper(jl_lambda_info_t* li, jl_expr_t* ast, Function* f) {
-	return gen_jlcall_wrapper(li, ast, f);
+    const std::string &fname = f->getName().str();
+
+	errs() << "Device Codegen: Generating jlcall dummy wrapper for "
+   		   << fname << "\n";
+
+    std::stringstream funcName;
+    funcName << "jlcall_";
+	funcName << li->target->name;
+	funcName << "dummy_";
+	funcName << fname;
+
+    std::stringstream message;
+	message << "Function '" << fname << "' for target '"
+		    << li->target->name << "' cannot be called from julia";
+
+	// Do not emit the wrapper into the device target module
+	auto M = new Module(funcName.str(), jl_LLVMContext);
+	jl_setup_module(M,true);
+
+    Function *w = Function::Create(jl_func_sig, imaging_mode ? GlobalVariable::InternalLinkage : GlobalVariable::ExternalLinkage,
+                                   funcName.str(), M);
+    addComdat(w);
+    Function::arg_iterator AI = w->arg_begin();
+    AI++; //const Argument &fArg = *AI++;
+    //Value *argArray = AI++;
+    //const Argument &argCount = *AI++;
+    BasicBlock *b0 = BasicBlock::Create(jl_LLVMContext, "top", w);
+
+    builder.SetInsertPoint(b0);
+    DebugLoc noDbg;
+    builder.SetCurrentDebugLocation(noDbg);
+
+    jl_codectx_t ctx;
+    ctx.linfo = li;
+
+	just_emit_error(message.str(), &ctx);
+	builder.CreateUnreachable();
+
+    return w;
 }
 
 codegen_target target_from_symbol(jl_sym_t* sym)
@@ -4960,6 +4998,9 @@ static Function *emit_function(jl_lambda_info_t *lam)
     // step 16. fix up size of stack root list
     finalize_gc_frame(&ctx);
 
+	if(ctx.target != HOST)
+		ctx.f->dump();
+
     // step 17, Apply LLVM level inlining
     for(std::vector<CallInst*>::iterator it = ctx.to_inline.begin(); it != ctx.to_inline.end(); ++it) {
         Function *inlinef = (*it)->getCalledFunction();
@@ -4969,6 +5010,8 @@ static Function *emit_function(jl_lambda_info_t *lam)
         inlinef->eraseFromParent();
     }
 
+	if(ctx.target != HOST)
+		ctx.f->dump();
     // step 18. Perform any delayed instantiations
     if (ctx.debug_enabled)
         ctx.dbuilder->finalize();
