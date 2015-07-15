@@ -180,6 +180,7 @@ enum codegen_target {
     PTX = 0,
 	SPIR,
 	HSAIL,
+	BRIG,
 	LAST_TARGET
 };
 
