@@ -17,16 +17,16 @@
 jl_function_t* get_function_spec(jl_function_t* f, jl_tupletype_t* tt)
 {
     jl_function_t *sf = f;
-    if (tt != NULL) {
+    if (tt != nullptr) {
         if (!jl_is_function(f) || !jl_is_gf(f)) {
-            return NULL;
+            return nullptr;
         }
         sf = jl_get_specialization(f, tt);
     }
-    if (sf == NULL || sf->linfo == NULL) {
+    if (sf == nullptr || sf->linfo == nullptr) {
         sf = jl_method_lookup_by_type(jl_gf_mtable(f), tt, 0, 0);
         if (sf == jl_bottom_func) {
-            return NULL;
+            return nullptr;
         }
         jl_printf(JL_STDERR,
                   "Warning: Returned code may not match what actually runs.\n");
@@ -491,7 +491,7 @@ extern "C" DLLEXPORT
 void *jl_get_spirf(jl_function_t *f, jl_tupletype_t *tt)
 {
     jl_function_t *sf = get_function_spec(f,tt);
-	if (sf->linfo->targetFunctionObjects[SPIR] == NULL) {
+	if (sf->linfo->targetFunctionObjects[SPIR] == nullptr) {
         to_spir(sf->linfo);
     }
 
@@ -522,7 +522,7 @@ static std::unique_ptr<Module> load_hsail_intrinsics()
 
 		bool isDir = false;
 		for (const auto D : SearchPath) {
-			if (D == NULL)
+			if (D == nullptr)
 				continue;
 
 			ec = sys::fs::is_directory(D, isDir);
@@ -666,7 +666,7 @@ extern "C" DLLEXPORT
 void *jl_get_hsailf(jl_function_t *f, jl_tupletype_t *tt)
 {
     jl_function_t *sf = get_function_spec(f,tt);
-    if (sf->linfo->targetFunctionObjects[HSAIL] == NULL) {
+    if (sf->linfo->targetFunctionObjects[HSAIL] == nullptr) {
         to_hsail(sf->linfo);
     }
 
@@ -703,9 +703,8 @@ extern "C" DLLEXPORT
 void* jl_get_brigf(jl_function_t* f, jl_tupletype_t* tt)
 {
     jl_function_t *sf = get_function_spec(f,tt);
-	if (sf->linfo->targetFunctionObjects[BRIG] == NULL) {
+	if (sf->linfo->targetFunctionObjects[BRIG] == nullptr) {
 		auto FHsail = jl_get_hsailf(f, tt);
-		((Function*)FHsail)->print(errs());
 		sf->linfo->targetFunctionObjects[BRIG] = to_brig(FHsail);
 	}
 
