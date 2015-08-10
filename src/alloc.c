@@ -358,6 +358,7 @@ jl_lambda_info_t *jl_new_lambda_info(jl_value_t *ast, jl_svec_t *sparams, jl_mod
     li->functionObject = NULL;
     li->specFunctionObject = NULL;
     li->cFunctionList = NULL;
+    memset(li->targetFunctionObjects, 0, sizeof(li->targetFunctionObjects));
     li->functionID = 0;
     li->specFunctionID = 0;
     li->specTypes = NULL;

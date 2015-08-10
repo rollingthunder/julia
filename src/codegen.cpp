@@ -1167,8 +1167,6 @@ const jl_value_t *jl_dump_function_ir(void *f, bool strip_ir_metadata, bool dump
     Function *llvmf = dyn_cast<Function>((Function*)f);
     if (!llvmf)
         jl_error("jl_dump_function_ir: Expected Function*");
-	else
-		jl_printf(JL_STDERR, "Is a Function: %s", llvmf->getName());
 
     if (llvmf->isDeclaration()) {
         // print the function declaration plain
