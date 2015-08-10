@@ -1,13 +1,18 @@
-#if 1
+#if 0
 #define SPIR_DEBUG(code) code;
 #else
 #define SPIR_DEBUG(code)
 #endif
-#if 1
+#if 0
 #define HSAIL_DEBUG(code) code;
 #else
 #define HSAIL_DEBUG(code)
 #endif
+#define DEBUG_IF(COND, CODE) \
+	if(COND) { CODE; }
+
+#define SP_IR 0
+#define HSA_IR 0
 
 jl_function_t* get_function_spec(jl_function_t* f, jl_tupletype_t* tt)
 {
@@ -87,7 +92,7 @@ public:
 	SPIRCodeGenContext();
 
 	void runOnModule(Module* M) override;
-	void updateFunctionSignature(std::vector<Type*>& argTypes, Type*& retType);
+	void updateFunctionSignature(jl_lambda_info_t* li, std::stringstream& fName, std::vector<Type*>& argTypes, Type*& retType);
 	virtual std::unique_ptr<PassManager> getModulePasses(Module* M) override;
 
 	Module* getModuleFor(jl_lambda_info_t* li) override {
@@ -142,9 +147,14 @@ void SPIRCodeGenContext::addMetadata(Function* F, jl_codectx_t& ctx) {
 	emitOpenCLKernelMetadata(F);
 }
 
-void SPIRCodeGenContext::updateFunctionSignature(std::vector<Type*>& argTypes, Type*& retType)
+void SPIRCodeGenContext::updateFunctionSignature(jl_lambda_info_t* li, std::stringstream& fName, std::vector<Type*>& argTypes, Type*& retType)
 {
-	SPIR_DEBUG(errs() << "SPIR: Updating function signature\n")
+	SPIR_DEBUG(errs() << "SPIR: Updating function signature\n");
+
+	// Strip pre- & suffixes from function name
+	fName.str("");
+	fName.clear();
+	fName << li->name->name;
 
 	if (!retType->isVoidTy())
 		jl_error("Only kernel functions returning void are supported");
@@ -442,14 +452,14 @@ void jl_init_spir_codegen(void)
 
 	targetCodeGenContexts[SPIR] = new SPIRCodeGenContext();
 
-	jl_printf(JL_STDERR, "SPIR codegen initialized\n");
+	SPIR_DEBUG(jl_printf(JL_STDERR, "SPIR codegen initialized\n"));
 }
 
 static Function *to_function(jl_lambda_info_t *li);
 
 static Function *to_spir(jl_lambda_info_t *li)
 {
-	jl_printf(JL_STDERR, "Generating SPIR\n");
+	SPIR_DEBUG(jl_printf(JL_STDERR, "SPIR: Generating\n"));
 
 	auto CTX = spir_ctx();
 
@@ -469,8 +479,7 @@ static Function *to_spir(jl_lambda_info_t *li)
 
 	CTX->runOnModule(M);
 
-	SPIR_DEBUG(errs() << "SPIR: Generated Module \n");
-	SPIR_DEBUG(M->dump());
+	SPIR_DEBUG(errs() << "SPIR: IR Generation completed\n");
 
 
 	li->targetFunctionObjects[SPIR] = F;
@@ -603,7 +612,7 @@ void jl_init_hsail_codegen(void)
 
 	targetCodeGenContexts[HSAIL] = CTX.release();
 
-	jl_printf(JL_STDERR, "HSAIL codegen initialized\n");
+	HSAIL_DEBUG(jl_printf(JL_STDERR, "HSAIL codegen initialized\n"));
 }
 
 extern "C" DLLEXPORT
@@ -646,7 +655,7 @@ Function* to_hsail(jl_lambda_info_t* li)
 	auto FHsail = MHsail->getFunction(FSpir->getName());
 	li->targetFunctionObjects[HSAIL] = FHsail;
 
-	MHsail->dump();
+	DEBUG_IF(HSA_IR, MHsail->dump());
 
 	MHsail.release();
 
@@ -696,6 +705,7 @@ void* jl_get_brigf(jl_function_t* f, jl_tupletype_t* tt)
     jl_function_t *sf = get_function_spec(f,tt);
 	if (sf->linfo->targetFunctionObjects[BRIG] == NULL) {
 		auto FHsail = jl_get_hsailf(f, tt);
+		((Function*)FHsail)->print(errs());
 		sf->linfo->targetFunctionObjects[BRIG] = to_brig(FHsail);
 	}
 

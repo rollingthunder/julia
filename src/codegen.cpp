@@ -506,7 +506,7 @@ public:
 	// commmon components for a device target codegen
 	TargetMachine* TM;
 
-	virtual void updateFunctionSignature(std::vector<Type*>& argTypes, Type*& retType) {}
+	virtual void updateFunctionSignature(jl_lambda_info_t* li, std::stringstream& fName, std::vector<Type*>& argTypes, Type*& retType) {}
 	virtual std::unique_ptr<PassManager> getModulePasses(Module* M);
 	virtual std::unique_ptr<FunctionPassManager> getFunctionPasses(Module* M);
 	virtual void runOnModule(Module* M);
@@ -568,10 +568,12 @@ private:
 	CodeGenContext* Inner;
 public:
 	WrappingCodeGenContext(CodeGenContext * inner) : Inner(inner) {}
-	virtual void updateFunctionSignature(std::vector<Type*>& argTypes, Type*& retType) override {
-		Inner->updateFunctionSignature(argTypes, retType);
+	virtual void updateFunctionSignature(jl_lambda_info_t* li, std::stringstream& fName, std::vector<Type*>& argTypes, Type*& retType) override {
+		Inner->updateFunctionSignature(li, fName, argTypes, retType);
 	}
-	virtual void runOnModule(Module* M) override {}
+	virtual void runOnModule(Module* M) override {
+		Inner->runOnModule(M);
+	}
 	virtual Module* getModuleFor(jl_lambda_info_t* li) override {
 		return Inner->getModuleFor(li);
 	}
@@ -1165,6 +1167,8 @@ const jl_value_t *jl_dump_function_ir(void *f, bool strip_ir_metadata, bool dump
     Function *llvmf = dyn_cast<Function>((Function*)f);
     if (!llvmf)
         jl_error("jl_dump_function_ir: Expected Function*");
+	else
+		jl_printf(JL_STDERR, "Is a Function: %s", llvmf->getName());
 
     if (llvmf->isDeclaration()) {
         // print the function declaration plain
@@ -4097,8 +4101,8 @@ static Function *gen_jlcall_wrapper(jl_lambda_info_t *lam, jl_expr_t *ast, Funct
 Function* CodeGenContext::generateWrapper(jl_lambda_info_t* li, jl_expr_t* ast, Function* f) {
     const std::string &fname = f->getName().str();
 
-	errs() << "Device Codegen: Generating jlcall dummy wrapper for "
-   		   << fname << "\n";
+	DEBUG_IF(DEBUG_DCG, errs() << "Device Codegen: Generating jlcall dummy wrapper for "
+   		   << fname << "\n");
 
     std::stringstream funcName;
     funcName << "jlcall_";
@@ -4196,15 +4200,17 @@ static Function *emit_function(jl_lambda_info_t *lam)
 	ctx.codegen = targetCodeGenContexts[ctx.target];
 	if (ctx.target != HOST) {
 		if(ctx.codegen == nullptr) {
-			// TODO Fall back gracefully
-			jl_error("requested codegen is not initialized\n");
-			ctx.target = HOST;
-		} else {
-			jl_printf(JL_STDERR, "Compiling function  %s for target %s \n",
+			jl_init_device_codegen(ctx.linfo->target);
+			ctx.codegen = targetCodeGenContexts[ctx.target];
+			if (ctx.codegen == nullptr) {
+				jl_error("could not initialize the requested codegen\n");
+				ctx.target = HOST;
+			}
+		}
+		DEBUG_IF(DEBUG_DCG,	jl_printf(JL_STDERR, "Compiling function  %s for target %s \n",
 					lam->name->name,
 					lam->target->name
-				);
-		}
+				));
 	}
 
     // step 2. process var-info lists to see what vars are captured, need boxing
@@ -4348,7 +4354,7 @@ static Function *emit_function(jl_lambda_info_t *lam)
 
 		if(ctx.target != HOST)
 		{
-			ctx.codegen->updateFunctionSignature(fsig, rt);
+			ctx.codegen->updateFunctionSignature(lam, funcName, fsig, rt);
 		}
 
         f = Function::Create(FunctionType::get(rt, fsig, false),
@@ -4717,7 +4723,7 @@ static Function *emit_function(jl_lambda_info_t *lam)
 				     (ctx.linfo->inferred) ? "true" : "false",
 					 (ctx.vars[s].isCaptured) ? "true" : "false",
 					 (ctx.vars[s].usedUndef) ? "true" : "false",
-					 ((jl_datatype_t*)vi.declType)->name->name->name //(isbits_spec(vi.declType,true)) ? "true" : "false"
+					 (isbits_spec(vi.declType,true)) ? "true" : "false"
 					);
         }
         else {
@@ -5091,7 +5097,10 @@ static Function *emit_function(jl_lambda_info_t *lam)
     finalize_gc_frame(&ctx);
 
 	if(ctx.target != HOST)
-		ctx.f->dump();
+	{
+		// Device IR output
+		// ctx.f->dump();
+	}
 
     // step 17, Apply LLVM level inlining
     for(std::vector<CallInst*>::iterator it = ctx.to_inline.begin(); it != ctx.to_inline.end(); ++it) {
@@ -5103,7 +5112,9 @@ static Function *emit_function(jl_lambda_info_t *lam)
     }
 
 	if(ctx.target != HOST)
-		ctx.f->dump();
+	{
+		DEBUG_IF(DEBUG_DCG, ctx.f->dump());
+	}
     // step 18. Perform any delayed instantiations
     if (ctx.debug_enabled)
         ctx.dbuilder->finalize();
