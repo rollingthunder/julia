@@ -1,6 +1,9 @@
 // This file is a part of Julia. License is MIT: http://julialang.org/license
 
 // utility procedures used in code generation
+#define DEBUG_IF(COND, CODE) \
+	if(COND) { CODE; }
+#define DEBUG_DCG 0
 
 #if defined(USE_MCJIT) && defined(_OS_WINDOWS_)
 template<class T> // for GlobalObject's
@@ -987,9 +990,9 @@ static void raise_exception_unless(Value *cond, Value *exc, jl_codectx_t *ctx)
     builder.SetInsertPoint(failBB);
     if (ctx->target != HOST) {
         // TODO: pass exception details (type, lineno, ...)
-		errs() << "Device CodeGen: Emitting Trap instead of exception\n";
+		DEBUG_IF(DEBUG_DCG, errs() << "Device CodeGen: Emitting Trap instead of exception\n");
 		emit_trap(ctx);
-		ctx->f->dump();
+		//ctx->f->dump();
     } else {
 #ifdef LLVM37
     builder.CreateCall(prepare_call(jlthrow_line_func), { exc,
@@ -1002,8 +1005,9 @@ static void raise_exception_unless(Value *cond, Value *exc, jl_codectx_t *ctx)
     builder.CreateUnreachable();
     ctx->f->getBasicBlockList().push_back(passBB);
     builder.SetInsertPoint(passBB);
-	if (ctx->target != HOST)
-		ctx->f->dump();
+	if (ctx->target != HOST){
+		//ctx->f->dump();
+	}
 }
 
 static void raise_exception_unless(Value *cond, GlobalVariable *exc,
@@ -1629,7 +1633,7 @@ static Value *emit_array_nd_index(Value *a, jl_value_t *ex, size_t nd, jl_value_
             builder.SetInsertPoint(failBB);
 
             // TODO: pass exception details (type, lineno, ...)
-			errs() << "Device CodeGen: Emitting Trap instead of bounds check\n";
+			DEBUG_IF(DEBUG_DCG, errs() << "Device CodeGen: Emitting Trap instead of bounds check\n");
 			emit_trap(ctx);
         } else {
 			Value *alen = emit_arraylen(a, ex, ctx);
