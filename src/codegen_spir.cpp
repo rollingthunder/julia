@@ -100,7 +100,7 @@ FunctionType *AddAddrSpacePass::mapFunctionType(FunctionType *FTy) {
             // can possibly need conversion
             if (PTy->getPointerAddressSpace() == 0) {
                 // Make all pointer arguments point to
-                // the global address spae
+                // the global address space
                 // TODO Provide a mechanism to change that
                 auto NewTy = PointerType::get(PTy->getPointerElementType(),
                                               LangAS::opencl_global);
