@@ -72,6 +72,9 @@ public:
     Module *getModuleFor(jl_lambda_info_t *li) override {
         auto M = new Module(li->name->name, getGlobalContext());
 
+        M->addModuleFlag(llvm::Module::Warning, "Dwarf Version",2);
+        M->addModuleFlag(llvm::Module::Error, "Debug Info Version",
+            llvm::DEBUG_METADATA_VERSION);
         M->setTargetTriple(TheTriple);
 
         Modules[li] = M;
@@ -105,11 +108,8 @@ SPIRCodeGenContext::SPIRCodeGenContext() : TheTriple("spir64-unknown-unknown") {
 void SPIRCodeGenContext::addMetadata(Function *F, jl_codectx_t &ctx) {
     SPIR_DEBUG(errs() << "SPIR: Adding Metadata for " << F->getName() << "\n")
 
-    // set call convention
-    if (isKernel(F))
-        F->setCallingConv(CallingConv::SPIR_KERNEL);
-    else
-        F->setCallingConv(CallingConv::SPIR_FUNC);
+    F->setCallingConv(CallingConv::SPIR_KERNEL);
+        //F->setCallingConv(CallingConv::SPIR_FUNC);
 
     emitOpenCLKernelMetadata(F);
 }
