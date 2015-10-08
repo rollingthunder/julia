@@ -2,7 +2,7 @@
 
 // utility procedures used in code generation
 #define DEBUG_IF(COND, CODE) \
-	if(COND) { CODE; }
+    if(COND) { CODE; }
 #define DEBUG_DCG 0
 
 #if defined(USE_MCJIT) && defined(_OS_WINDOWS_)
@@ -975,13 +975,21 @@ static void error_unless(Value *cond, const std::string &msg, jl_codectx_t *ctx)
 
 static void emit_trap(jl_codectx_t* ctx)
 {
-	llvm::Value *Trap =
-		Intrinsic::getDeclaration(ctx->f->getParent(), Intrinsic::trap);
-	CallInst *TrapCall = builder.CreateCall(Trap, ArrayRef<Value*>());
-	TrapCall->setDoesNotReturn();
-	TrapCall->setDoesNotThrow();
+    llvm::Value *Trap =
+        Intrinsic::getDeclaration(ctx->f->getParent(), Intrinsic::trap);
+    CallInst *TrapCall = builder.CreateCall(Trap, ArrayRef<Value*>());
+    TrapCall->setDoesNotReturn();
+    TrapCall->setDoesNotThrow();
 }
 
+static void emit_debugtrap(jl_codectx_t* ctx)
+{
+    llvm::Value *Trap =
+        Intrinsic::getDeclaration(ctx->f->getParent(), Intrinsic::debugtrap);
+    CallInst *TrapCall = builder.CreateCall(Trap, ArrayRef<Value*>());
+    TrapCall->setDoesNotReturn();
+    TrapCall->setDoesNotThrow();
+}
 static void raise_exception_unless(Value *cond, Value *exc, jl_codectx_t *ctx)
 {
     BasicBlock *failBB = BasicBlock::Create(getGlobalContext(),"fail",ctx->f);
@@ -990,9 +998,9 @@ static void raise_exception_unless(Value *cond, Value *exc, jl_codectx_t *ctx)
     builder.SetInsertPoint(failBB);
     if (ctx->target != HOST) {
         // TODO: pass exception details (type, lineno, ...)
-		DEBUG_IF(DEBUG_DCG, errs() << "Device CodeGen: Emitting Trap instead of exception\n");
-		emit_trap(ctx);
-		//ctx->f->dump();
+        DEBUG_IF(DEBUG_DCG, errs() << "Device CodeGen: Emitting Trap instead of exception\n");
+        emit_trap(ctx);
+        //ctx->f->dump();
     } else {
 #ifdef LLVM37
     builder.CreateCall(prepare_call(jlthrow_line_func), { exc,
@@ -1005,9 +1013,9 @@ static void raise_exception_unless(Value *cond, Value *exc, jl_codectx_t *ctx)
     builder.CreateUnreachable();
     ctx->f->getBasicBlockList().push_back(passBB);
     builder.SetInsertPoint(passBB);
-	if (ctx->target != HOST){
-		//ctx->f->dump();
-	}
+    if (ctx->target != HOST){
+        //ctx->f->dump();
+    }
 }
 
 static void raise_exception_unless(Value *cond, GlobalVariable *exc,
