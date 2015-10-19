@@ -762,6 +762,22 @@ static void maybe_alloc_arrayvar(jl_sym_t *s, jl_codectx_t *ctx)
 codegen_target target_from_symbol(jl_sym_t* sym);
 
 extern "C" DLLEXPORT
+bool jl_has_device_target(jl_sym_t* sym)
+{
+    auto target = target_from_symbol(sym);
+
+    switch(target)
+    {
+        case HOST:
+        case SPIR:
+        case HSAIL:
+            return true;
+        default:
+            return false;
+    }
+}
+
+extern "C" DLLEXPORT
 bool jl_init_device_codegen(jl_sym_t* sym)
 {
     auto target = target_from_symbol(sym);
@@ -4050,7 +4066,7 @@ codegen_target target_from_symbol(jl_sym_t* sym)
         }
         else
         {
-            jl_error((std::string("unknown codegen target ") + sym->name).c_str());
+            return UNKNOWN;
         }
     }
 }

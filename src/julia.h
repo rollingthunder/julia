@@ -187,6 +187,7 @@ typedef jl_value_t *(*jl_fptr_t)(jl_value_t*, jl_value_t**, uint32_t);
 typedef struct _jl_datatype_t jl_tupletype_t;
 
 enum codegen_target {
+    UNKNOWN = -2,
     HOST = -1,
     PTX = 0,
 	SPIR,
