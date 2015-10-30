@@ -303,7 +303,7 @@ endif
 ifeq ($(LLVM_DEBUG),1)
 LLVM_BUILDTYPE = Debug
 else
-LLVM_BUILDTYPE = Release
+LLVM_BUILDTYPE = RelWithDebInfo
 endif
 ifeq ($(LLVM_ASSERTIONS),1)
 LLVM_BUILDTYPE := $(LLVM_BUILDTYPE)+Asserts
