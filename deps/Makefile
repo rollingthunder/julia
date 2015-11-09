@@ -189,6 +189,11 @@ endif
 #HSAIL Target
 ifneq ($(findstring HSAIL, $(LLVM_TARGETS)),)
 STAGE1_DEPS += hsail
+
+# needs clang for some reason
+BUILD_LLVM_CLANG = 1
+# if that does not work, try commit 40b68b4c02b9d9e1e4138815747adf5589496240
+LLVM_GIT_VER_CLANG = release_37 
 endif # HSAIL Target
 
 ## Common build target prefixes
