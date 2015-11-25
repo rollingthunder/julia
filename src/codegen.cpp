@@ -659,6 +659,10 @@ static void maybe_alloc_arrayvar(jl_sym_t *s, jl_codectx_t *ctx)
 
 codegen_target target_from_symbol(jl_sym_t* sym);
 
+/*
+ * Allows the HSA.jl Package to query for
+ * code generator support
+ */
 extern "C" DLLEXPORT
 bool jl_has_device_target(jl_sym_t* sym)
 {
@@ -675,6 +679,9 @@ bool jl_has_device_target(jl_sym_t* sym)
     }
 }
 
+/*
+ * Initializes the code generator objects.
+ */
 extern "C" DLLEXPORT
 bool jl_init_device_codegen(jl_sym_t* sym)
 {
@@ -4130,6 +4137,8 @@ static Function *emit_function(jl_lambda_info_t *lam)
     ctx.boundsCheck.push_back(true);
     ctx.target = target_from_symbol(ctx.linfo->target);
     ctx.codegen = targetCodeGenContexts[ctx.target];
+    // If a device target is requested and the code generator has not been
+    // initialized, do so now.
     if (ctx.target != HOST) {
         if(ctx.codegen == nullptr) {
             jl_init_device_codegen(ctx.linfo->target);
@@ -4259,6 +4268,8 @@ static Function *emit_function(jl_lambda_info_t *lam)
         m = jl_Module;
 #endif
     } else {
+        // Delegate module construction, so the codegen
+        // can decide what to do
         m = ctx.codegen->getModuleFor(ctx.linfo);
     }
     funcName << "_" << globalUnique++;
@@ -4286,6 +4297,8 @@ static Function *emit_function(jl_lambda_info_t *lam)
 
         if(ctx.target != HOST)
         {
+            // Give the device code generator the opportunity
+            // to override the function signature
             ctx.codegen->updateFunctionSignature(lam, funcName, fsig, rt);
         }
 
@@ -4302,6 +4315,8 @@ static Function *emit_function(jl_lambda_info_t *lam)
         if (lam->functionObject == NULL) {
             Function *fwrap;
             if (ctx.target != HOST)
+                // the generic jlcall wrapper may not be compatible with the device function
+                // so, let the codegen generate the wrapper
                 fwrap = ctx.codegen->generateWrapper(lam, ast, f);
             else
                 fwrap = gen_jlcall_wrapper(lam, ast, f, ctx.sret);
@@ -4337,12 +4352,15 @@ static Function *emit_function(jl_lambda_info_t *lam)
 #endif
 
 #ifdef JL_DEBUG_BUILD
+    // Stackprotect is incompatible with device targets
     if (ctx.target == HOST)
         f->addFnAttr(Attribute::StackProtectReq);
 #endif
     ctx.f = f;
 
     if (ctx.target != HOST) {
+        // Now is the time to add metadata
+        // for example the SPIR kernel metadata
         ctx.codegen->addMetadata(f, ctx);
     }
 
@@ -4628,12 +4646,10 @@ static Function *emit_function(jl_lambda_info_t *lam)
             alloc_local(s, &ctx);
         }
         else if (ctx.target != HOST) {
+            // If we get here, the codegen has decided to box something, which is bad
             // TODO: Move to CodeGenContext
-            jl_errorf("device target does not support boxing of function argument %s (inferred: %s, capt: %s, usedundef: %s)",
-                      s->name,
-                     (ctx.linfo->inferred) ? "true" : "false",
-                     (ctx.vars[s].isCaptured) ? "true" : "false",
-                     (ctx.vars[s].usedUndef) ? "true" : "false"
+            jl_errorf("device target does not support boxing of function argument %s",
+                      s->name
                      );
         }
         else if (ctx.vars[s].isAssigned || (va && i==largslen-1)) {
@@ -4651,13 +4667,10 @@ static Function *emit_function(jl_lambda_info_t *lam)
             alloc_local(s, &ctx);
         }
         else if (ctx.target != HOST) {
+            // If we get here, the codegen has decided to box something, which is bad
             // TODO: Move to CodeGenContext
-            jl_errorf("device target does not support boxing of local variable %s (inferred: %s, capt: %s, usedundef: %s, typeisbits: %s, decltype: %s)",
+            jl_errorf("device target does not support boxing of local variable %s",
                       s->name,
-                     (ctx.linfo->inferred) ? "true" : "false",
-                     (ctx.vars[s].isCaptured) ? "true" : "false",
-                     (ctx.vars[s].usedUndef) ? "true" : "false",
-                     (isbits_spec(vi.declType,false)) ? "true" : "false"
                     );
         }
         else {
@@ -5029,12 +5042,6 @@ static Function *emit_function(jl_lambda_info_t *lam)
 
     // step 16. fix up size of stack root list
     finalize_gc_frame(&ctx);
-
-    if(ctx.target != HOST)
-    {
-        // Device IR output
-        // ctx.f->dump();
-    }
 
     // step 17, Apply LLVM level inlining
     for(std::vector<CallInst*>::iterator it = ctx.to_inline.begin(); it != ctx.to_inline.end(); ++it) {

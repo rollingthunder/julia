@@ -8,6 +8,14 @@
 #define HSAIL_DEBUG(code)
 #endif
 
+#define HSAIL_INT_DEBUG(code) DEBUG_IF(HSAIL_INT, code);
+
+/*
+ * Code generator implementation for HSAIL
+ * Internally, uses the SPIR code gen for preprocessing
+ * and then links the HSAIL intrinsics to the SPIR function
+ * and passes it to the HSAIL Target
+ */
 class HSAILCodeGenContext : public WrappingCodeGenContext {
 public:
     Triple TheTriple;
@@ -151,6 +159,9 @@ extern "C" DLLEXPORT Function *to_hsail(jl_lambda_info_t *li) {
     return FHsail;
 }
 
+/*
+ * Gets the HSA IR specialization for f with the argument types in tt
+ */
 extern "C" DLLEXPORT void *jl_get_hsailf(jl_function_t *f, jl_tupletype_t *tt) {
     jl_function_t *sf = get_function_spec(f, tt);
     if (sf->linfo->targetFunctionObjects[HSAIL] == nullptr) {
@@ -160,6 +171,10 @@ extern "C" DLLEXPORT void *jl_get_hsailf(jl_function_t *f, jl_tupletype_t *tt) {
     return (Function *)sf->linfo->targetFunctionObjects[HSAIL];
 }
 
+/*
+ * Uses the HSAIL Target to convert the HSA IR function
+ * to BRIG
+ */
 SmallVector<char, 4096> *to_brig(void *f) {
     auto CTX = hsail_ctx();
     auto FHsail = (Function *)f;
@@ -185,6 +200,11 @@ SmallVector<char, 4096> *to_brig(void *f) {
     return ObjBufferSV.release();
 }
 
+/*
+ * Build a BRIG blob for the function
+ * and return a pointer to it.
+ * Will be called from Julia
+ */
 extern "C" DLLEXPORT void *jl_get_brigf(jl_function_t *f, jl_tupletype_t *tt) {
     jl_function_t *sf = get_function_spec(f, tt);
     if (sf->linfo->targetFunctionObjects[BRIG] == nullptr) {
@@ -196,6 +216,11 @@ extern "C" DLLEXPORT void *jl_get_brigf(jl_function_t *f, jl_tupletype_t *tt) {
         ->data();
 }
 
+/*
+ * Uses the HSAIL Target to emit HSAIL assembly
+ * from an HSA IR function
+ * Returns the code as a Julia string
+ */
 extern "C" DLLEXPORT jl_value_t *jl_dump_function_hsail(void *f) {
     auto CTX = hsail_ctx();
     auto FHsail = (Function *)f;

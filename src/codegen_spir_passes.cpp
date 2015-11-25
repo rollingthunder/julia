@@ -56,19 +56,26 @@ void setMDNodeKernelOperand(NamedMDNode *KernelMD, size_t i, Function *K) {
     }
 }
 
+/*
+ * Module pass that converts LLVM IR to SPIR by
+ * - adding address spaces to arguments of pointer types
+ * - propagating the address spaces through the function body
+ */
 class SpirConvertSccPass : public ModulePass {
     static char PassID;
 
-    typedef std::vector<Value *> Values;
-
-    Values deadInstructions;
-
+    // Replace non-kernel functions, changing their signature
+    //  and propagate changed address spaces recursively
     Function *mapFunction(ValueToValueMapTy &VMap, Module &M, Function *F,
                           FunctionType *NewFTy);
+    // Replace Kernel functions to add the necessary address space info
     Function *mapKernel(ValueToValueMapTy &VMap, Module &M, Function *Kernel);
 
+    // Add address spaces to the signature
     FunctionType *mapKernelSignature(FunctionType *FTy);
+    // Recursively chang the type of users of V, if necessary
     void propagateAddressSpace(Value *V);
+    // push changed address spaces through to called functions
     void mapCalls(ValueToValueMapTy &VMap, Function *F);
 
 public:
@@ -82,15 +89,21 @@ char SpirConvertSccPass::PassID;
 bool SpirConvertSccPass::runOnModule(Module &M) {
     ValueToValueMapTy VMap;
 
+    // Find Kernels via metadata
     auto oclKernels = getOrInsertOpenCLKernelNode(&M);
 
     for (auto i = 0U, num = oclKernels->getNumOperands(); i < num; ++i) {
         if (auto kernel = getKernelFromMDNode(oclKernels, i)) {
             SPIR_DEBUG(errs() << "SPIR: Running on Kernel " << kernel->getName()
                               << "\n");
+            // Add address spaces to each kernel
             auto newKernel = mapKernel(VMap, M, kernel);
 
+            // and update the metadata node because we replaced
+            // the kernel
             setMDNodeKernelOperand(oclKernels, i, newKernel);
+
+            // remove the old kernel
             kernel->eraseFromParent();
         } else {
             errs() << "OpenCL Kernel Node Operand is not a Kernel\n";

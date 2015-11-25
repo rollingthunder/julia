@@ -3,6 +3,11 @@
         CODE;                                                                  \
     }
 
+/*
+ * Common base class for device code generators
+ * This defines the interface, with default implementations
+ * in case the subclass is not interested in implementing something
+ */
 class CodeGenContext {
 public:
     // commmon components for a device target codegen
@@ -64,6 +69,12 @@ CodeGenContext::getFunctionPasses(Module *M) {
 
     return FPM;
 }
+
+/*
+ * Base class for a device code generator
+ * that allows only implementing some of the interface methods
+ * and letting the others be forwarded to another, inner, code generator
+ */
 class WrappingCodeGenContext : public CodeGenContext {
 private:
     CodeGenContext *Inner;
